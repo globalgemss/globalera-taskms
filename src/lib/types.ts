@@ -1,0 +1,8 @@
+export type Role = 'admin' | 'manager' | 'staff'
+export type Profile = {id:string,user_code:string,full_name:string,email:string,phone:string|null,designation:string|null,department_id:string|null,manager_id:string|null,role:Role,status:string,created_at:string,departments?:{name:string}|null}
+export type Project = {id:string,project_no:string,name:string,status:string,description:string|null,manager_id:string|null,created_at:string}
+export type Task = {id:string,task_no:string,title:string,description:string|null,project_id:string|null,priority:string,status:string,progress:number,start_date:string|null,due_date:string|null,due_time:string|null,created_by:string,supervisor_id:string|null,created_at:string,updated_at:string,completed_at:string|null,projects?:{name:string}|null,task_assignees?:{user_id:string,progress:number,profiles?:{full_name:string}|null}[]}
+export type Notice = {id:string,title:string,message:string,priority:string,target_type:string,start_date:string|null,end_date:string|null,is_active:boolean,created_at:string,notice_reads?:{user_id:string}[]}
+export type Timeline = {id:string,entry_type:string,description:string,created_at:string,actor_id:string|null}
+export type TaskNote = {id:string,body:string,visibility:string,created_at:string,author_id:string}
+export type Followup = {id:string,followup_at:string,method:string,outcome:string|null,remarks:string|null,created_at:string,task_id:string,tasks?:{task_no:string,title:string}|null}
