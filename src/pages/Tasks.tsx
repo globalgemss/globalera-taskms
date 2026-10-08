@@ -20,27 +20,52 @@ export default function Tasks(){const nav=useNavigate(),[params,setParams]=useSe
  useEffect(()=>{if(params.get('new')==='1'&&profile?.role!=='staff'){setCreateOpen(true);setParams({}, {replace:true})}},[params,profile,setParams])
  async function dropTask(t:Task,col:string){
   if(moving||col===t.status)return
-  if(col==='Completed'){
-   toast.info('Manager Approval is required. Open the task Review panel to approve.');nav(`/tasks/${t.id}`);return
+  const isStaff=profile?.role==='staff'
+  if(isStaff&&!t.task_assignees?.some(a=>a.user_id===profile?.id)){
+   toast.error('You can only move tasks assigned to you.');return
   }
-  if(col==='In Progress'&&t.status==='Assigned'){
-   toast.info('Assigned Staff must press Start Work so actual time tracking begins.');nav(`/tasks/${t.id}`);return
+  if(col==='Completed'){
+   toast.info('Completion requires Manager Review → Approve.');nav(`/tasks/${t.id}`);return
+  }
+  if(col==='In Progress'&&['Assigned','Waiting','On Hold'].includes(t.status)){
+   if(!isStaff){
+    toast.info('The assigned staff member must Start Work. Open the task to manage the timer.');nav(`/tasks/${t.id}`);return
+   }
+   const current=timers.find(x=>x.task_id===t.id&&x.user_id===profile?.id)
+   const timer_action=current?.state==='paused'?'resume':current?.state==='running'?null:'start'
+   try{
+    setMoving(true)
+    if(timer_action){
+     await api('timer_transition',{task_id:t.id,user_id:profile!.id,timer_action,reason:'',request_id:crypto.randomUUID()})
+    }else{
+     await api('change_status',{task_id:t.id,status:'In Progress'})
+    }
+    toast.success('Work started · moved to In Progress')
+    await Promise.all([queryClient.invalidateQueries({queryKey:keys.tasks}),queryClient.invalidateQueries({queryKey:timerKeys.all}),queryClient.invalidateQueries({queryKey:['task_elapsed_clocks']})])
+   }catch(e){toast.error((e as Error).message)}finally{setMoving(false)}
+   return
   }
   if(col==='Assigned'){
-   if(t.status!=='In Progress'){toast.info('This stage needs Task Details to reassign or reopen.');nav(`/tasks/${t.id}`);return}
+   if(isStaff){toast.info('Use Break/Pause from Task Details instead.');return}
+   if(t.status!=='In Progress'){toast.info('This task cannot be put on hold from here.');return}
    col='On Hold'
   }
-  if(col==='Review'&&t.status!=='In Progress'){toast.info('Only active work can be submitted for Review.');return}
-  if(col==='In Progress'&&!['On Hold','Waiting','Review'].includes(t.status)){
-   toast.info('Start or resume work from Task Details.');nav(`/tasks/${t.id}`);return
+  if(col==='Review'&&t.status!=='In Progress'){
+   toast.info('Only In Progress tasks can be submitted for Review.');return
   }
-  if(profile?.role==='staff'&&col!=='Review'){
-   toast.info('Staff can submit work for review; managers control other status changes.');return
+  if(t.status==='Review'&&col==='In Progress'){
+   toast.info('Use Manager Review → Return for Correction, so the reason is recorded.');nav(`/tasks/${t.id}`);return
+  }
+  if(isStaff&&col!=='Review'){
+   toast.info('Staff can Start Work or Submit for Review.');return
+  }
+  if(col==='In Progress'&& !['Waiting','On Hold'].includes(t.status)){
+   toast.info('Start/Resume Work from Task Details.');nav(`/tasks/${t.id}`);return
   }
   try{
    setMoving(true)
    await api('change_status',{task_id:t.id,status:col})
-   toast.success(`Task updated: ${col}`)
+   toast.success(col==='Review'?'Task submitted for Manager Review':`Task updated: ${col}`)
    await Promise.all([queryClient.invalidateQueries({queryKey:keys.tasks}),queryClient.invalidateQueries({queryKey:timerKeys.all}),queryClient.invalidateQueries({queryKey:['task_elapsed_clocks']})])
   }catch(e){toast.error((e as Error).message)}finally{setMoving(false)}
  }
@@ -49,7 +74,7 @@ export default function Tasks(){const nav=useNavigate(),[params,setParams]=useSe
  return <div className="fade-in"><PageTitle title="Task Management" description="Plan, assign, track and complete work in one place." action={profile?.role!=='staff'?<Btn onClick={()=>setCreateOpen(true)}><Plus size={17}/>New Task</Btn>:undefined}/>
  <div className="task-summary"><Card><strong>{tasks.length}</strong><span>Total Tasks</span></Card><Card><strong>{tasks.filter(t=>t.status==='In Progress').length}</strong><span>In Progress</span></Card><Card><strong>{tasks.filter(isOverdue).length}</strong><span>Overdue</span></Card><Card><strong>{tasks.filter(t=>t.status==='Completed').length}</strong><span>Completed</span></Card></div>
  <Card className="list-panel"><div className="list-toolbar"><SearchInput value={q} onChange={setQ} placeholder="Search by task ID, title, or project…"/><div className="toolbar-select"><Filter size={16}/><Select aria-label="Filter by status" value={status} onChange={e=>setStatus(e.target.value)}><option>All</option>{[...statuses,'Overdue'].map(s=><option key={s}>{s}</option>)}</Select></div><Select aria-label="Filter by priority" className="filter-priority" value={priority} onChange={e=>setPriority(e.target.value)}><option>All</option>{priorities.map(s=><option key={s}>{s}</option>)}</Select><div className="view-switch"><button aria-label="Kanban view" className={view==='board'?'active':''} onClick={()=>setView('board')}><LayoutGrid size={15}/> Board</button><button aria-label="Table view" className={view==='table'?'active':''} onClick={()=>setView('table')}>Table</button><button aria-label="Card view" className={view==='cards'?'active':''} onClick={()=>setView('cards')}>Cards</button></div></div>
- {isLoading?<Loader/>:error?<div className="error-box">{(error as Error).message}</div>:!list.length?<Empty title="No matching tasks" description="Try changing the filters or create a task."/>:view==='board'?<SmartKanbanBoard tasks={list} timers={timers} role={profile?.role||'staff'} disabled={moving} onOpen={t=>nav(`/tasks/${t.id}`)} onMove={(t,col)=>void dropTask(t,col)}/>:view==='table'?<div className="responsive-table"><table><thead><tr><th>Task</th><th>Priority</th><th>Status</th><th>Progress</th><th>Due Date</th><th/></tr></thead><tbody>{list.map(t=><tr key={t.id} onClick={()=>nav(`/tasks/${t.id}`)} tabIndex={0} onKeyDown={e=>e.key==='Enter'&&nav(`/tasks/${t.id}`)} className="click-row"><td><strong>{t.title}</strong><small>{t.task_no} · {t.projects?.name||'General'}</small></td><td><Badge value={t.priority}/></td><td><Badge value={isOverdue(t)?'Overdue':t.status}/></td><td><div className="progress-inline"><span><i style={{width:`${t.progress}%`}}/></span><small>{t.progress}%</small></div></td><td>{dateLabel(t.due_date)}</td><td><ChevronRight size={17}/></td></tr>)}</tbody></table></div>:<div className="task-card-grid">{list.map(t=><button className="task-card" key={t.id} onClick={()=>nav(`/tasks/${t.id}`)}><div className="task-card-head"><span>{t.task_no}</span><Badge value={t.priority}/></div><h3>{t.title}</h3><p>{t.description||'No description added'}</p><div className="task-card-meta"><Badge value={isOverdue(t)?'Overdue':t.status}/><span><CalendarClock size={14}/> {dateLabel(t.due_date)}</span></div><div className="progress-inline"><span><i style={{width:`${t.progress}%`}}/></span><small>{t.progress}%</small></div></button>)}</div>}
+ {isLoading?<Loader/>:error?<div className="error-box">{(error as Error).message}</div>:!list.length?<Empty title="No matching tasks" description="Try changing the filters or create a task."/>:view==='board'?<SmartKanbanBoard tasks={list} timers={timers} role={profile?.role||'staff'} userId={profile?.id} disabled={moving} onOpen={t=>nav(`/tasks/${t.id}`)} onMove={(t,col)=>void dropTask(t,col)}/>:view==='table'?<div className="responsive-table"><table><thead><tr><th>Task</th><th>Priority</th><th>Status</th><th>Progress</th><th>Due Date</th><th/></tr></thead><tbody>{list.map(t=><tr key={t.id} onClick={()=>nav(`/tasks/${t.id}`)} tabIndex={0} onKeyDown={e=>e.key==='Enter'&&nav(`/tasks/${t.id}`)} className="click-row"><td><strong>{t.title}</strong><small>{t.task_no} · {t.projects?.name||'General'}</small></td><td><Badge value={t.priority}/></td><td><Badge value={isOverdue(t)?'Overdue':t.status}/></td><td><div className="progress-inline"><span><i style={{width:`${t.progress}%`}}/></span><small>{t.progress}%</small></div></td><td>{dateLabel(t.due_date)}</td><td><ChevronRight size={17}/></td></tr>)}</tbody></table></div>:<div className="task-card-grid">{list.map(t=><button className="task-card" key={t.id} onClick={()=>nav(`/tasks/${t.id}`)}><div className="task-card-head"><span>{t.task_no}</span><Badge value={t.priority}/></div><h3>{t.title}</h3><p>{t.description||'No description added'}</p><div className="task-card-meta"><Badge value={isOverdue(t)?'Overdue':t.status}/><span><CalendarClock size={14}/> {dateLabel(t.due_date)}</span></div><div className="progress-inline"><span><i style={{width:`${t.progress}%`}}/></span><small>{t.progress}%</small></div></button>)}</div>}
  <div className="table-bottom">Showing {list.length} of {tasks.length} tasks <span>Up to 300 recent records loaded · server/RLS filtered</span></div></Card>
  <TaskForm open={createOpen} onClose={()=>setCreateOpen(false)}/>
  </div>
