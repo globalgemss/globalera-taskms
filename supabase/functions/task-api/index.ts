@@ -1,6 +1,6 @@
 import {actor,audit,cors,err,hashPin,hmacLink,isPin,isTaskAccessible,notification,randHex,requireAdmin,requireManager,respond,sha256,text,timeline} from '../_shared/core.ts'
 
-const actions=['create_user','update_user','add_user_note','get_link','rotate_link','reset_pin','change_pin','create_task','update_task','assign_task','update_progress','change_status','add_note','add_followup','review_task','create_notice','toggle_notice','read_notice','complete_followup','create_project','create_department','mark_notification_read','create_unit','update_unit','set_unit_member','add_checklist','toggle_checklist','add_evidence','create_milestone','complete_milestone','create_recurring_rule','run_recurring_rules','toggle_recurring_rule']
+const actions=['create_user','update_user','add_user_note','get_link','rotate_link','reset_pin','change_pin','create_task','update_task','assign_task','update_progress','change_status','add_note','add_followup','review_task','create_notice','toggle_notice','read_notice','complete_followup','create_project','create_department','mark_notification_read','create_unit','update_unit','set_unit_member','add_checklist','toggle_checklist','add_evidence','create_milestone','complete_milestone','create_recurring_rule','run_recurring_rules','toggle_recurring_rule','timer_transition','verify_task_time']
 const transitions:Record<string,string[]>={
  New:['Assigned','Cancelled'],Assigned:['In Progress','On Hold','Cancelled'],
  'In Progress':['Waiting','On Hold','Review','Cancelled'],Waiting:['In Progress','On Hold','Cancelled'],
@@ -178,7 +178,7 @@ Deno.serve(async(req)=>{
     if(!['Low','Normal','High','Urgent'].includes(priority))throw Error('Invalid priority')
     const insert={title,description:text(body.description,8000)||null,project_id:projectId,unit_id:unitId,priority,
       start_date:body.start_date||null,due_date:body.due_date||null,
-      due_time:body.due_time||null,created_by:myId,supervisor_id:body.supervisor_id||myId,status:'Assigned'}
+      due_time:body.due_time||null,created_by:myId,supervisor_id:body.supervisor_id||myId,status:'Assigned',estimated_minutes:Math.max(0,Math.min(100000,Math.trunc(Number(body.estimated_minutes)||0)))}
     const requestId=String(body.client_request_id||'')
     if(!/^[a-f0-9-]{36}$/i.test(requestId))throw Error('Missing client request identifier')
     const {data:created,error:te}=await admin.from('tasks').insert({...insert,client_request_id:requestId}).select('id,task_no,title').single()
@@ -196,7 +196,7 @@ Deno.serve(async(req)=>{
     const t=await taskManager()
     if(profile.role==='manager'&&t.created_by!==myId&&t.supervisor_id!==myId)throw Error('Only owner/supervisor may edit this task')
     const patch:Record<string,unknown>={}
-    for(const key of ['title','description','priority','due_date','due_time','start_date','project_id'])if(Object.hasOwn(body,key))patch[key]=body[key]||null
+    for(const key of ['title','description','priority','due_date','due_time','start_date','project_id','estimated_minutes'])if(Object.hasOwn(body,key))patch[key]=body[key]||null
     if(Object.hasOwn(patch,'project_id'))patch.project_id=await validateProject(patch.project_id,t.unit_id)
     if(patch.title && text(patch.title).length<3)throw Error('Title too short')
     if(patch.priority&&!['Low','Normal','High','Urgent'].includes(String(patch.priority)))throw Error('Invalid priority')
@@ -215,7 +215,15 @@ Deno.serve(async(req)=>{
     const old=(prev||[]).map(x=>x.user_id)
     const additions=ids.filter(id=>!old.includes(id)),removals=old.filter(id=>!ids.includes(id))
     if(additions.length){const {error}=await admin.from('task_assignees').insert(additions.map(user_id=>({task_id:t.id,user_id,assigned_by:myId})));if(error)throw Error(error.message)}
-    if(removals.length){const {error}=await admin.from('task_assignees').delete().eq('task_id',t.id).in('user_id',removals);if(error)throw Error(error.message)}
+    if(removals.length){
+      const {data:activeTimers,error:timersError}=await admin.from('task_timers').select('user_id,state').eq('task_id',t.id).in('user_id',removals).in('state',['running','paused'])
+      if(timersError)throw Error(timersError.message)
+      for(const running of activeTimers||[]){
+        const {error:stopError}=await admin.rpc('taskms_timer_transition',{p_task_id:t.id,p_user_id:running.user_id,p_actor_id:myId,p_action:'stop',p_reason:'Unassigned by manager',p_request_id:crypto.randomUUID()})
+        if(stopError)throw Error(stopError.message)
+      }
+      const {error}=await admin.from('task_assignees').delete().eq('task_id',t.id).in('user_id',removals);if(error)throw Error(error.message)
+    }
     await timeline(admin,t.id,myId,'Reassigned',`Assignees updated (+${additions.length}, -${removals.length})`)
     if(additions.length)await admin.from('user_timeline').insert(additions.map(user_id=>({user_id,actor_id:myId,entry_type:'Task Assigned',description:`Assigned task ${t.title}`})))
     await notification(admin,additions,'New Task Assigned',t.title,t.id)
@@ -242,12 +250,61 @@ Deno.serve(async(req)=>{
     await timeline(admin,t.id,myId,'Progress Updated',`Progress updated to ${value}% (overall ${mean}%)`)
     return respond({progress:mean})
    }
+   case 'timer_transition':{
+    const t=await task()
+    const act=String(body.timer_action||'')
+    if(!['start','pause','resume','stop'].includes(act))throw Error('Invalid timer control')
+    const target=String(body.user_id||myId)
+    const m=await membership(myId,t.unit_id)
+    const canControl=profile.role==='admin'||Boolean(m&&['manager','unit_admin'].includes(m.role))
+    if(['start','stop'].includes(act)&&!canControl)throw Error('Admin or authorized manager must start/stop task timers')
+    if(!canControl&&target!==myId)throw Error('Staff can only pause/resume their own task timer')
+    if(!canControl&& !['pause','resume'].includes(act))throw Error('Timer action not permitted')
+    const {data:assigned}=await admin.from('task_assignees').select('user_id').eq('task_id',t.id).eq('user_id',target).maybeSingle()
+    if(!assigned)throw Error('Selected user is not assigned to the task')
+    const reqId=String(body.request_id||'')
+    if(!/^[a-f0-9-]{36}$/i.test(reqId))throw Error('Valid timer request identifier required')
+    const reason=text(body.reason,500)
+    if(act==='pause'&&!reason)throw Error('Pause reason required')
+    const {data,error}=await admin.rpc('taskms_timer_transition',{
+      p_task_id:t.id,p_user_id:target,p_actor_id:myId,p_action:act,p_reason:reason||null,p_request_id:reqId
+    })
+    if(error)throw Error(error.message)
+    await audit(admin,myId,'TIMER_'+act.toUpperCase(),'task',t.id,{staff_id:target,reason})
+    if(act==='start')await notification(admin,[target],'Work timer started',t.title,t.id)
+    return respond({timer:data,success:true})
+   }
+   case 'verify_task_time':{
+    const t=await taskManager()
+    if(t.status!=='Review'&&t.status!=='Completed')throw Error('Time verification requires Review or Completed task')
+    const staff=String(body.user_id||''),{data:timer}=await admin.from('task_timers').select('elapsed_seconds,state').eq('task_id',t.id).eq('user_id',staff).maybeSingle()
+    if(!timer||timer.state!=='stopped')throw Error('Stopped staff timer not found')
+    const seconds=Number(body.verified_seconds)
+    if(!Number.isInteger(seconds)||seconds<0||seconds>315360000)throw Error('Invalid verified time')
+    const remarks=text(body.remarks,1000)
+    if(seconds!==timer.elapsed_seconds&&!remarks)throw Error('Time correction reason required')
+    const {error}=await admin.from('task_time_reviews').insert({task_id:t.id,user_id:staff,reviewer_id:myId,logged_seconds:timer.elapsed_seconds,verified_seconds:seconds,remarks})
+    if(error)throw Error(error.message)
+    await timeline(admin,t.id,myId,'Time Verified',`Staff time verified: ${seconds}s. ${remarks}`)
+    await audit(admin,myId,'TIME_VERIFIED','task',t.id,{staff,seconds,remarks})
+    return respond({success:true})
+   }
    case 'change_status':{
     const t=await task();const next=String(body.status||'')
     if(!transitions[t.status]?.includes(next))throw Error(`Invalid transition ${t.status} → ${next}`)
     if(next==='Completed'||t.status==='Completed'||next==='Cancelled')await canManage(t.unit_id)
     if(t.status==='Review'&&next==='Completed')throw Error('Use Review Approve action')
     if(t.status==='Review'&&next==='In Progress')await canManage(t.unit_id)
+    if(next==='Review'){
+      if(profile.role==='staff'){
+        const {data:own}=await admin.from('task_assignees').select('user_id').eq('task_id',t.id).eq('user_id',myId).maybeSingle()
+        if(!own)throw Error('Only assigned staff may submit for review')
+      }
+      const {error:se}=await admin.rpc('taskms_submit_for_review',{p_task_id:t.id,p_actor_id:myId})
+      if(se)throw Error(se.message)
+      return respond({success:true})
+    }
+    if(next==='In Progress'&&t.status==='Assigned')throw Error('Work must be started by an authorized manager using Start Timer')
     const {error}=await admin.from('tasks').update({status:next,completed_at:next==='Completed'?new Date().toISOString():null,completed_by:next==='Completed'?myId:null}).eq('id',t.id)
     if(error)throw Error(error.message)
     await timeline(admin,t.id,myId,'Status Changed',`${t.status} → ${next}`)

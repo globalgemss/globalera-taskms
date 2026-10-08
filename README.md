@@ -228,3 +228,15 @@ Do NOT commit `.env.local`. `.gitignore` ignores it.
 ## Security guidance
 
 Do not print PIN on QR cards. Use private repo, environment variables, HTTPS and backups. Restrict initial Admin provisioning to a secure setup procedure. Avoid third-party plugins that inject scripts or expose access tokens. Password/PIN flows and RLS should undergo independent review before storing real staff personal information.
+
+---
+
+## V3 Timer & Modern UI — 8 October 2026
+
+The V3 upgrade adds `supabase/migrations/202610080006_v3_task_timers.sql` and `202610080007_v3_timer_realtime.sql`; **apply to your dedicated TaskMS project only**. In the existing connected TaskMS project, the migrations have already been applied.
+
+Admin / delegated Unit Manager starts an assignee's work timer from Task Details. Assigned Staff may pause (reason required) and resume their own timer. Browser refresh or closing the tab does not affect the server-based elapsed time. Each Staff member is limited to one running timer across all tasks. Task submission for Review auto-stops timers. Review and verified time corrections require Manager approval and are recorded in the audit trail.
+
+Desktop Tasks includes Board / Table / Cards. Mobile Staff Home shows the bright blue active timer widget. `Time Tracking` is on the sidebar, includes unit-scoped metrics and a CSV export. Timer state uses Supabase RLS and Edge Function control, with database-side atomic operations.
+
+**Do not call the system security-audited or fully production accepted until real multi-user phone QR/PIN sessions, refresh-session revocation after reset, role isolation, concurrent clicks and manager review are acceptance-tested.** Vite build alone does not run TypeScript typecheck. See `V3_RELEASE_REPORT.md` for current checks/limitations.
