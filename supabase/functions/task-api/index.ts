@@ -30,21 +30,28 @@ Deno.serve(async(req)=>{
   switch(action){
    case 'create_user':{
     adminOnly()
-    const full_name=text(body.full_name,120),email=text(body.email,254).toLowerCase(),role=text(body.role,20)
-    if(full_name.length<2||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||!['staff','manager','admin'].includes(role))throw Error('Valid name, email and role required')
+    const full_name=text(body.full_name,120),role=text(body.role,20)
+    const providedEmail=text(body.email,254).toLowerCase()
+    // Staff login is always QR + PIN. A non-deliverable internal Auth identity
+    // is generated when an email address was not supplied, never mailed to.
+    const email=providedEmail || (role==='staff'?`staff-${randHex(12)}@example.invalid`:'')
+    if(full_name.length<2||!['staff','manager','admin'].includes(role))throw Error('Valid name and role required')
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw Error('A valid email is required for Admin and Manager')
+    const phone=text(body.phone,30),alternate_phone=text(body.alternate_phone,30)
+    if(phone&&!/^[+\d()\-\s]{7,22}$/.test(phone))throw Error('Enter a valid phone number')
     // Each staff has an internal Auth identity so their RLS policies work correctly.
     const tempPassword=randHex(18)+'A!'
     const {data:created,error:ce}=await admin.auth.admin.createUser({email,password:tempPassword,email_confirm:true,user_metadata:{full_name}})
     if(ce||!created.user)throw Error(ce?.message||'Could not create auth account')
     const newId=created.user.id
-    const {data:updated,error:ue}=await admin.from('profiles').update({full_name,email,role,phone:text(body.phone,30)||null,designation:text(body.designation,80)||null,department_id:body.department_id||null,manager_id:body.manager_id||null}).eq('id',newId).select('id,user_code,full_name,email,role').single()
+    const {data:updated,error:ue}=await admin.from('profiles').update({full_name,email,role,phone:phone||null,alternate_phone:alternate_phone||null,address:text(body.address,500)||null,joining_date:body.joining_date||null,designation:text(body.designation,80)||null,department_id:body.department_id||null,manager_id:body.manager_id||null}).eq('id',newId).select('id,user_code,full_name,email,role').single()
     if(ue){await admin.auth.admin.deleteUser(newId);throw Error(ue.message)}
     let access:Record<string,unknown>={}
     if(role==='staff'){
      const pin=String(1000+(crypto.getRandomValues(new Uint32Array(1))[0]%9000))
      const nonce=randHex(24),token=await hmacLink(newId,nonce),salt=randHex(18)
      const {error:le}=await admin.from('user_access_links').insert({user_id:newId,nonce,token_hash:await sha256(token),pin_salt:salt,pin_hash:await hashPin(pin,salt)})
-     if(le)throw Error(le.message)
+     if(le){await admin.auth.admin.deleteUser(newId);throw Error('QR access setup failed: '+le.message)}
      access={temporary_pin:pin,link_token:token}
     }else access={temporary_password:tempPassword}
     await admin.from('user_timeline').insert({user_id:newId,actor_id:myId,entry_type:'Account Created',description:`Account created with role ${role}`})
@@ -55,7 +62,8 @@ Deno.serve(async(req)=>{
     adminOnly()
     const id=String(body.user_id||'')
     const patch:Record<string,unknown>={}
-    for(const key of ['full_name','phone','alternate_phone','designation','department_id','manager_id','status','role'])if(Object.hasOwn(body,key))patch[key]=body[key]||null
+    for(const key of ['full_name','phone','alternate_phone','address','joining_date','designation','department_id','manager_id','status','role'])if(Object.hasOwn(body,key))patch[key]=body[key]||null
+    if(patch.full_name&&text(patch.full_name,120).length<2)throw Error('Full name must have at least 2 characters')
     if(patch.status&&!['Active','Inactive','Suspended'].includes(String(patch.status)))throw Error('Invalid user status')
     if(patch.role&&!['admin','manager','staff'].includes(String(patch.role)))throw Error('Invalid role')
     if(id===myId&&patch.status&&patch.status!=='Active')throw Error('Cannot deactivate yourself')
@@ -93,8 +101,8 @@ Deno.serve(async(req)=>{
     const {data:target}=await admin.from('profiles').select('role,status').eq('id',id).maybeSingle()
     if(target?.role!=='staff')throw Error('QR access is only for staff accounts')
     const nonce=randHex(24),token=await hmacLink(id,nonce)
-    const {error}=await admin.from('user_access_links').update({nonce,token_hash:await sha256(token),is_active:target.status==='Active',failures:0,locked_until:null}).eq('user_id',id)
-    if(error)throw Error(error.message)
+    const {data:link,error}=await admin.from('user_access_links').update({nonce,token_hash:await sha256(token),is_active:target.status==='Active',failures:0,locked_until:null}).eq('user_id',id).select('id').maybeSingle()
+    if(error||!link)throw Error(error?.message||'No staff access record found')
     // The per-user JWT cutoff immediately blocks prior access tokens in RLS and API guards.
     await admin.from('profiles').update({token_valid_after:Math.floor(Date.now()/1000)}).eq('id',id)
     await admin.from('user_timeline').insert({user_id:id,actor_id:myId,entry_type:'QR Regenerated',description:'A new secure access link was issued'})
@@ -105,8 +113,8 @@ Deno.serve(async(req)=>{
     adminOnly()
     const id=String(body.user_id||'')
     const pin=String(1000+(crypto.getRandomValues(new Uint32Array(1))[0]%9000)),salt=randHex(18)
-    const {error}=await admin.from('user_access_links').update({pin_hash:await hashPin(pin,salt),pin_salt:salt,failures:0,locked_until:null}).eq('user_id',id)
-    if(error)throw Error(error.message)
+    const {data:link,error}=await admin.from('user_access_links').update({pin_hash:await hashPin(pin,salt),pin_salt:salt,failures:0,locked_until:null}).eq('user_id',id).select('id').maybeSingle()
+    if(error||!link)throw Error(error?.message||'No staff access record found')
     await admin.from('profiles').update({token_valid_after:Math.floor(Date.now()/1000)}).eq('id',id)
     await admin.from('user_timeline').insert({user_id:id,actor_id:myId,entry_type:'PIN Reset',description:'Access PIN reset by administrator'})
     await audit(admin,myId,'PIN_RESET','profile',id)

@@ -24,8 +24,11 @@ export const sha256=async(s:string)=>toHex(new Uint8Array(await crypto.subtle.di
 export const toHex=(arr:Uint8Array)=>Array.from(arr).map(x=>x.toString(16).padStart(2,'0')).join('')
 export const randHex=(n:number)=>toHex(crypto.getRandomValues(new Uint8Array(n)))
 export async function hmacLink(userId:string,nonce:string){
- const secret=Deno.env.get('ACCESS_LINK_SECRET')
- if(!secret||secret.length<32)throw Error('ACCESS_LINK_SECRET not configured (minimum 32 characters)')
+ // Dedicated secret is preferred. The hosted Supabase service-role key is a stable
+ // high-entropy server-only fallback, so staff creation works on fresh projects.
+ // If the key rotates, regenerate staff QR links, or configure ACCESS_LINK_SECRET.
+ const secret=Deno.env.get('ACCESS_LINK_SECRET') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+ if(!secret||secret.length<32)throw Error('Server access secret is unavailable. Contact your administrator.')
  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign'])
  return toHex(new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(`${userId}:${nonce}`))))
 }
