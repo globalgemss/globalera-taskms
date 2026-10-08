@@ -1,0 +1,46 @@
+import {useMemo,useState} from 'react'
+import {useQuery,useQueryClient} from '@tanstack/react-query'
+import {Check,Clock3,Edit3,Filter,Link2,MessageSquare,Pin,PinOff,Search,Send,Shield,Timer,UserRound} from 'lucide-react'
+import {toast} from 'sonner'
+import {api,supabase} from '../lib/supabase'
+import {useAuth} from '../lib/auth'
+import {useProfiles} from '../lib/data'
+import {when} from '../lib/utils'
+import {Badge,Btn,Empty,Field,Select,TextArea,TextInput} from './UI'
+
+type Note={id:string;body:string;visibility:string;author_id:string;created_at:string;note_type?:string;is_pinned?:boolean;edited_at?:string|null;attachment_url?:string|null}
+type Event={id:string;entry_type:string;description:string;actor_id:string|null;created_at:string}
+type Edit={id:string;note_id:string;old_body:string;new_body:string;editor_id:string;edited_at:string}
+type Entry={id:string;type:'Note'|'Activity';date:string;note?:Note;event?:Event}
+const noteTypes=['General','Work Update','Issue','Instruction','Follow-up','Important']
+function groupType(e:Event){const txt=e.entry_type.toLowerCase();return /timer|time|break|work started|work paused/.test(txt)?'Timer':/follow.?up/.test(txt)?'Follow-up':/review|approved|returned|correction|completed|submit/.test(txt)?'Review':'Activity'}
+export function TaskActivity({taskId,defaultFilter='All'}:{taskId:string;defaultFilter?:string}){
+ const {profile}=useAuth(),{data:people=[]}=useProfiles(),qc=useQueryClient()
+ const {data:notes=[],isLoading:ln}=useQuery({queryKey:['notes',taskId],queryFn:async()=>{const {data,error}=await supabase.from('task_notes').select('*').eq('task_id',taskId).order('created_at',{ascending:false}).limit(250);if(error)throw error;return(data||[]) as Note[]}})
+ const {data:timeline=[],isLoading:lt}=useQuery({queryKey:['timeline',taskId],queryFn:async()=>{const {data,error}=await supabase.from('task_timeline').select('*').eq('task_id',taskId).order('created_at',{ascending:false}).limit(250);if(error)throw error;return(data||[]) as Event[]}})
+ const {data:edits=[]}=useQuery({queryKey:['task-note-edits',taskId],queryFn:async()=>{if(!notes.length)return [] as Edit[];const{data,error}=await supabase.from('task_note_edits').select('*').in('note_id',notes.map(n=>n.id)).order('edited_at',{ascending:false}).limit(250);if(error)throw error;return(data||[]) as Edit[]},enabled:!!notes.length})
+ const [filter,setFilter]=useState(defaultFilter),[search,setSearch]=useState(''),[text,setText]=useState(''),[kind,setKind]=useState('General'),[visibility,setVisibility]=useState('Team'),[link,setLink]=useState(''),[editing,setEditing]=useState<string|null>(null),[editText,setEditText]=useState(''),[busy,setBusy]=useState(false)
+ const role=profile?.role||'staff',canManage=role==='admin'||role==='manager'
+ const entries=useMemo<Entry[]>(()=>{
+  const records:Entry[]=[...notes.map(note=>({id:'n-'+note.id,type:'Note' as const,date:note.created_at,note})),...timeline.filter(e=>e.entry_type!=='Note Added').map(event=>({id:'e-'+event.id,type:'Activity' as const,date:event.created_at,event}))]
+  const normalized=search.toLowerCase().trim()
+  return records.filter(e=>{if(filter==='Notes'&&e.type!=='Note')return false;if(filter==='Timer'&&(e.type!=='Activity'||groupType(e.event!)!=='Timer'))return false;if(filter==='Follow-up'&&(e.type!=='Activity'||groupType(e.event!)!=='Follow-up'))return false;if(filter==='Review'&&(e.type!=='Activity'||groupType(e.event!)!=='Review'))return false;
+   return !normalized||[e.note?.body,e.note?.note_type,e.event?.entry_type,e.event?.description].join(' ').toLowerCase().includes(normalized)
+  }).sort((a,b)=>Date.parse(b.date)-Date.parse(a.date))
+ },[notes,timeline,filter,search])
+ const pinned=filter==='Notes'?entries.filter(e=>e.note?.is_pinned):[]
+ async function refresh(){await Promise.all([qc.invalidateQueries({queryKey:['notes',taskId]}),qc.invalidateQueries({queryKey:['timeline',taskId]}),qc.invalidateQueries({queryKey:['task-note-edits',taskId]})])}
+ async function save(e:React.FormEvent){e.preventDefault();if(!text.trim()||busy)return;setBusy(true);try{await api('add_note',{task_id:taskId,body:text,note_type:kind,visibility,attachment_url:link.trim()||null});setText('');setLink('');toast.success('Note saved to task timeline');await refresh()}catch(ex){toast.error((ex as Error).message)}finally{setBusy(false)}}
+ async function edit(id:string){if(!editText.trim()||busy)return;setBusy(true);try{await api('edit_task_note',{task_id:taskId,note_id:id,body:editText.trim()});toast.success('Note edited with history');setEditing(null);await refresh()}catch(ex){toast.error((ex as Error).message)}finally{setBusy(false)}}
+ async function pin(note:Note){if(busy)return;setBusy(true);try{await api('pin_task_note',{task_id:taskId,note_id:note.id,is_pinned:!note.is_pinned});await refresh()}catch(ex){toast.error((ex as Error).message)}finally{setBusy(false)}}
+ const who=(id:string|null|undefined)=>people.find(p=>p.id===id)?.full_name||(id===profile?.id?profile.full_name:'Team member')
+ return <div className="v33-activity">
+  <div className="v33-activity-head"><div><h3>Notes & Activity Timeline</h3><p>Work progress, conversations, timers and approvals — in one place</p></div><MessageSquare size={19}/></div>
+  <form className="v33-note-editor" onSubmit={save}><Field label="Add Note / Work Update"><TextArea required rows={3} value={text} onChange={e=>setText(e.target.value)} placeholder="What happened? Add an update, issue or instruction..."/></Field><div className="v33-note-options"><Select aria-label="Note type" value={kind} onChange={e=>setKind(e.target.value)}>{noteTypes.map(t=><option key={t}>{t}</option>)}</Select><Select aria-label="Note visibility" value={visibility} onChange={e=>setVisibility(e.target.value)}><option value="Team">Team visible</option>{canManage&&<option value="Manager">Managers only</option>}{role==='admin'&&<option value="Admin">Admin only</option>}</Select><TextInput aria-label="Optional HTTPS attachment link" type="url" placeholder="Optional attachment https://..." value={link} onChange={e=>setLink(e.target.value)}/><Btn loading={busy} type="submit"><Send size={15}/> Save Note</Btn></div></form>
+  <div className="v33-activity-filters"><div className="v33-activity-filter-tabs">{['All','Notes','Timer','Follow-up','Review'].map(t=><button type="button" key={t} className={filter===t?'active':''} onClick={()=>setFilter(t)}>{t}</button>)}</div><label className="v33-search v33-activity-search"><Search size={14}/><input aria-label="Search timeline" placeholder="Search timeline" value={search} onChange={e=>setSearch(e.target.value)}/></label></div>
+  {ln||lt?<div className="muted">Loading timeline...</div>:entries.length?<div className="v33-timeline-list">{[...pinned,...entries.filter(e=>!pinned.includes(e))].map(item=><div key={item.id} className={`v33-timeline-row ${item.note?.is_pinned?'v33-pinned':''}`}><div className={`v33-timeline-symbol ${item.type==='Note'?'is-note':'is-activity'}`}>{item.type==='Note'?<MessageSquare size={16}/>:groupType(item.event!)==='Timer'?<Timer size={16}/>:<Clock3 size={16}/>}</div><div className="v33-timeline-body"><div className="v33-timeline-top"><strong>{item.type==='Note'?`${item.note?.note_type||'General'} Note`:item.event?.entry_type}</strong><small>{when(item.date)}</small></div><div className="v33-timeline-author"><UserRound size={13}/>{who(item.note?.author_id||item.event?.actor_id)}{item.note&&<Badge value={item.note.visibility}/>}</div>
+  {item.note? <><p>{item.note.body}</p>{item.note.edited_at&&<small className="v33-edit-stamp">Edited {when(item.note.edited_at)}</small>}{item.note.attachment_url&&<a href={item.note.attachment_url} target="_blank" rel="noopener noreferrer" className="v33-attachment"><Link2 size={14}/> Open attached document</a>}<div className="v33-note-actions">{(item.note.author_id===profile?.id||role==='admin')&&<button type="button" onClick={()=>{setEditing(item.note!.id);setEditText(item.note!.body)}}><Edit3 size={13}/> Edit</button>}{canManage&&<button type="button" disabled={busy} onClick={()=>void pin(item.note!)}>{item.note.is_pinned?<PinOff size={13}/>:<Pin size={13}/>} {item.note.is_pinned?'Unpin':'Pin'}</button>}</div>{editing===item.note.id&&<div className="v33-note-edit"><TextArea rows={3} value={editText} onChange={e=>setEditText(e.target.value)}/><div><Btn loading={busy} onClick={()=>void edit(item.note!.id)}><Check size={14}/> Save edit</Btn><Btn variant="secondary" onClick={()=>setEditing(null)}>Cancel</Btn></div></div>}{edits.some(e=>e.note_id===item.note?.id)&&<details className="v33-note-history"><summary>Edit history ({edits.filter(e=>e.note_id===item.note?.id).length})</summary>{edits.filter(e=>e.note_id===item.note?.id).map(e=><p key={e.id}><small>{who(e.editor_id)} · {when(e.edited_at)}</small><span>Previous: {e.old_body}</span></p>)}</details>}</>:<p>{item.event?.description}</p>}
+  </div></div>)}</div>:<Empty title="No activity matches these filters" description="Try another filter or add a work update."/>}
+  <p className="v33-note-footer"><Shield size={14}/> Private notes are visible only to authorized roles. Earlier notes remain in history.</p>
+ </div>
+}

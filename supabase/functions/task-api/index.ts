@@ -1,6 +1,6 @@
 import {actor,audit,cors,err,hashPin,hmacLink,isPin,isTaskAccessible,notification,randHex,requireAdmin,requireManager,respond,sha256,text,timeline} from '../_shared/core.ts'
 
-const actions=['create_user','update_user','add_user_note','get_link','rotate_link','reset_pin','change_pin','create_task','update_task','assign_task','update_progress','change_status','add_note','add_followup','review_task','create_notice','toggle_notice','read_notice','complete_followup','create_project','create_department','mark_notification_read','create_unit','update_unit','set_unit_member','add_checklist','toggle_checklist','add_evidence','create_milestone','complete_milestone','create_recurring_rule','run_recurring_rules','toggle_recurring_rule','timer_transition','verify_task_time','create_work_plan','set_work_plan_status','add_work_plan_item','carry_forward_plan_item','create_holiday','set_holiday_active','set_work_calendar','authorize_holiday_work']
+const actions=['create_user','update_user','add_user_note','get_link','rotate_link','reset_pin','change_pin','create_task','update_task','assign_task','update_progress','change_status','add_note','add_followup','review_task','create_notice','toggle_notice','read_notice','complete_followup','create_project','create_department','mark_notification_read','create_unit','update_unit','set_unit_member','add_checklist','toggle_checklist','add_evidence','create_milestone','complete_milestone','create_recurring_rule','run_recurring_rules','toggle_recurring_rule','timer_transition','verify_task_time','create_work_plan','set_work_plan_status','add_work_plan_item','carry_forward_plan_item','create_holiday','set_holiday_active','set_work_calendar','authorize_holiday_work','create_achievement','update_achievement','edit_task_note','pin_task_note']
 const transitions:Record<string,string[]>={
  New:['Assigned','Cancelled'],Assigned:['In Progress','On Hold','Cancelled'],
  'In Progress':['Waiting','On Hold','Review','Cancelled'],Waiting:['In Progress','On Hold','Cancelled'],
@@ -311,12 +311,78 @@ Deno.serve(async(req)=>{
     return respond({success:true})
    }
    case 'add_note':{
-    const t=await task(),content=text(body.body,4000),visibility=body.visibility==='Admin'?'Admin':'Team'
-    if(content.length<1)throw Error('Note required')
-    if(visibility==='Admin'&&profile.role!=='admin')throw Error('Only Admin may create private notes')
-    const {error}=await admin.from('task_notes').insert({task_id:t.id,author_id:myId,body:content,visibility})
+    const t=await task(),content=text(body.body,4000)
+    const visibility=['Team','Manager','Admin'].includes(String(body.visibility))?String(body.visibility):'Team'
+    const noteType=['General','Work Update','Issue','Instruction','Follow-up','Important'].includes(String(body.note_type))?String(body.note_type):'General'
+    const attachment=text(body.attachment_url,1000)||null
+    if(!content)throw Error('Note required')
+    if(visibility==='Admin'&&profile.role!=='admin')throw Error('Admin-only notes require Admin access')
+    if(visibility==='Manager'&&!['admin','manager'].includes(profile.role))throw Error('Manager notes require manager access')
+    if(attachment&&!/^https:\/\/[^\s]+$/i.test(attachment))throw Error('Use a valid HTTPS attachment link')
+    const {error}=await admin.from('task_notes').insert({task_id:t.id,author_id:myId,body:content,visibility,note_type:noteType,attachment_url:attachment})
     if(error)throw Error(error.message)
-    await timeline(admin,t.id,myId,'Note Added',content,visibility)
+    await timeline(admin,t.id,myId,'Note Added',`${noteType} note added`,visibility)
+    return respond({success:true})
+   }
+   case 'edit_task_note':{
+    const t=await task(), noteId=String(body.note_id||''),content=text(body.body,4000)
+    const {data:note}=await admin.from('task_notes').select('*').eq('id',noteId).eq('task_id',t.id).maybeSingle()
+    if(!note)throw Error('Note not found')
+    if(note.author_id!==myId&&profile.role!=='admin')throw Error('Only note author or Admin can edit')
+    if(!content)throw Error('Note cannot be empty')
+    const {data:changed,error}=await admin.from('task_notes').update({body:content,edited_at:new Date().toISOString()}).eq('id',noteId).eq('body',note.body).select('id').maybeSingle()
+    if(error)throw Error(error.message)
+    if(!changed)throw Error('Note was changed elsewhere; refresh and try again')
+    if(note.body!==content){
+     const {error:historyError}=await admin.from('task_note_edits').insert({note_id:noteId,editor_id:myId,old_body:note.body,new_body:content})
+     if(historyError)throw Error(historyError.message)
+     await timeline(admin,t.id,myId,'Note Edited',`${note.note_type||'General'} note edited`,note.visibility)
+    }
+    return respond({success:true})
+   }
+   case 'pin_task_note':{
+    const t=await taskManager(),noteId=String(body.note_id||'')
+    const {data:note}=await admin.from('task_notes').select('id').eq('id',noteId).eq('task_id',t.id).maybeSingle()
+    if(!note)throw Error('Note not found')
+    const {error}=await admin.from('task_notes').update({is_pinned:Boolean(body.is_pinned)}).eq('id',noteId)
+    if(error)throw Error(error.message)
+    await timeline(admin,t.id,myId,body.is_pinned?'Note Pinned':'Note Unpinned','Important note pin changed')
+    return respond({success:true})
+   }
+   case 'create_achievement':{
+    adminOnly()
+    const unitId=await mustUnit(body.unit_id),title=text(body.title,220)
+    if(title.length<3)throw Error('Achievement title must be at least 3 characters')
+    const projectId=await validateProject(body.project_id,unitId)
+    const taskId=String(body.task_id||'')||null
+    if(taskId){const {data:related}=await admin.from('tasks').select('unit_id').eq('id',taskId).maybeSingle();if(!related||related.unit_id!==unitId)throw Error('Task does not belong to selected business unit')}
+    const evidence=text(body.evidence_url,1000)||null
+    if(evidence&&!/^https:\/\/[^\s]+$/i.test(evidence))throw Error('Only HTTPS evidence links are allowed')
+    const occurred=String(body.achieved_at||'')
+    if(occurred&&Number.isNaN(Date.parse(occurred)))throw Error('Invalid date')
+    const requestId=String(body.request_id||'')
+    if(!/^[a-f0-9-]{36}$/i.test(requestId))throw Error('Missing achievement request identifier')
+    const {data:created,error}=await admin.from('work_achievements').insert({unit_id:unitId,title,description:text(body.description,5000),achieved_at:occurred||new Date().toISOString(),project_id:projectId,task_id:taskId,evidence_url:evidence,created_by:myId,request_id:requestId}).select('id,title').single()
+    if(error?.code==='23505'){const {data:existing}=await admin.from('work_achievements').select('id,title').eq('request_id',requestId).maybeSingle();if(existing)return respond({achievement:existing,duplicate:true})}
+    if(error||!created)throw Error(error?.message||'Could not add achievement')
+    await audit(admin,myId,'ACHIEVEMENT_CREATED','achievement',created.id,{unit_id:unitId})
+    return respond({achievement:created})
+   }
+   case 'update_achievement':{
+    adminOnly()
+    const id=String(body.achievement_id||'')
+    const {data:ach}=await admin.from('work_achievements').select('*').eq('id',id).maybeSingle()
+    if(!ach)throw Error('Achievement not found')
+    if(Object.hasOwn(body,'archived')){
+      const {error}=await admin.from('work_achievements').update({archived_at:body.archived?new Date().toISOString():null,updated_at:new Date().toISOString()}).eq('id',id)
+      if(error)throw Error(error.message)
+    }else{
+      const title=text(body.title,220),desc=text(body.description,5000)
+      if(title.length<3)throw Error('Enter a title')
+      const {error}=await admin.from('work_achievements').update({title,description:desc,updated_at:new Date().toISOString()}).eq('id',id)
+      if(error)throw Error(error.message)
+    }
+    await audit(admin,myId,'ACHIEVEMENT_UPDATED','achievement',id)
     return respond({success:true})
    }
    case 'add_followup':{

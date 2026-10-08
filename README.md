@@ -1,3 +1,12 @@
+## TaskMS V3.3 (2026-10-08)
+
+- New **Work Updates**: Approved task feed, Admin-created achievements, staff/unit filters, CSV.
+- **Role-aware UI**: Admin, Manager and Staff see purpose-built navigation. Admin-only Holiday/Automation, Manager My Team, staff My Work.
+- **Kanban upgrade**: Four gentle column themes, desktop drag and drop, mobile action selection. The backend rejects unsafe status transitions; a review approval is never replaced by a drag-and-drop.
+- **Unified Notes/Timeline**: Notes and events, visibility levels, note types, pin, edit history, filters, attachment HTTPS URLs.
+- Database migrations `202610080011_v33_work_updates_notes.sql` and `202610080012_v33_live_updates.sql` must run before frontend/API deployment. Preserve all V3.2 records.
+- See `V3_3_RELEASE_REPORT.md` for scope and remaining verification.
+
 # Global Era TaskMS V2 — Multiple Business Operations
 
 **Current upgrade:** Multi-business workspace layout, SQL unit isolation, backend authorization, project milestones, staff task checklists, evidence HTTPS links, calendar, recurring tasks (pg_cron daily 01:00 UTC = 06:45 Nepal), unit member management, roles, task lifecycle / notes / reviews / notices / follow-ups / reports.
