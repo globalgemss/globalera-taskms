@@ -1,6 +1,6 @@
 import {useEffect,useState,type ReactNode} from 'react'
 import {NavLink,useNavigate} from 'react-router-dom'
-import {LayoutDashboard,ListTodo,Users,FolderKanban,CalendarClock,Megaphone,BarChart3,History,Settings,Bell,Menu,X,Plus,CheckCheck,ChevronDown,LogOut,UserRound,PanelLeftClose,Building2,CalendarDays,Repeat2,Timer} from 'lucide-react'
+import {LayoutDashboard,ListTodo,Users,FolderKanban,CalendarClock,Megaphone,BarChart3,History,Settings,Bell,Menu,X,Plus,CheckCheck,ChevronDown,LogOut,UserRound,PanelLeftClose,Building2,CalendarDays,Repeat2,Timer,CalendarRange,CalendarOff} from 'lucide-react'
 import {useQueryClient} from '@tanstack/react-query'
 import {useAuth} from '../lib/auth'
 import {useUnit} from '../lib/units'
@@ -11,6 +11,8 @@ import {toast} from 'sonner'
 const menu=[
  {url:'/dashboard',label:'Dashboard',icon:LayoutDashboard,roles:['admin','manager','staff']},
  {url:'/tasks',label:'My Tasks & Board',icon:ListTodo,roles:['admin','manager','staff']},
+ {url:'/planning',label:'Work Planning',icon:CalendarRange,roles:['admin','manager','staff']},
+ {url:'/holidays',label:'Holidays & Workdays',icon:CalendarOff,roles:['admin','manager','staff']},
  {url:'/time',label:'Time Tracking',icon:Timer,roles:['admin','manager','staff']},
  {url:'/users',label:'Team & Users',icon:Users,roles:['admin']},
  {url:'/projects',label:'Projects',icon:FolderKanban,roles:['admin','manager','staff']},
@@ -30,7 +32,9 @@ export function Shell({children}:{children:ReactNode}){
  useEffect(()=>{setMobile(false)},[navigate])
  useEffect(()=>{
   const channel=supabase.channel(`taskms-${profile?.id}`).on('postgres_changes',{event:'*',schema:'public',table:'tasks'},()=>{void query.invalidateQueries({queryKey:['tasks']})})
+   .on('postgres_changes',{event:'*',schema:'public',table:'task_elapsed_clocks'},()=>{void query.invalidateQueries({queryKey:['task_elapsed_clocks']})})
    .on('postgres_changes',{event:'*',schema:'public',table:'task_timers'},()=>{void query.invalidateQueries({queryKey:['task_timers']})})
+   .on('postgres_changes',{event:'*',schema:'public',table:'staff_break_intervals'},()=>{void query.invalidateQueries({queryKey:['staff_break_intervals']})})
    .on('postgres_changes',{event:'*',schema:'public',table:'task_timer_events'},()=>{void query.invalidateQueries({queryKey:['timer-events']})})
    .on('postgres_changes',{event:'*',schema:'public',table:'notices'},()=>{void query.invalidateQueries({queryKey:['notices']})})
    .on('postgres_changes',{event:'INSERT',schema:'public',table:'notifications',filter:`user_id=eq.${profile?.id}`},()=>{void query.invalidateQueries({queryKey:['notifications']})}).subscribe()

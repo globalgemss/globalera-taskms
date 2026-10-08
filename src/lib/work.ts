@@ -1,0 +1,26 @@
+import {useQuery} from '@tanstack/react-query'
+import {supabase} from './supabase'
+import {useUnit} from './units'
+export type WorkPlan={id:string;unit_id:string;title:string;description:string|null;period_type:'Daily'|'Weekly'|'Monthly';period_start:string;period_end:string;status:'Draft'|'Published'|'Archived';created_at:string}
+export type WorkPlanItem={id:string;plan_id:string;task_id:string;planned_date:string;planned_minutes:number;target_outcome:string|null;carried_from_id:string|null;tasks?:{title:string;task_no:string;status:string;completed_at:string|null;due_date:string|null;progress:number;task_assignees?:{user_id:string}[]}|null}
+export type Holiday={id:string;unit_id:string;title:string;start_date:string;end_date:string;notes:string|null;active:boolean}
+export type WorkCalendar={unit_id:string;weekly_off:number[]}
+export type TaskClock={id:string;unit_id:string;task_id:string;cycle:number;started_at:string;stopped_at:string|null;stop_reason:string|null}
+export type BreakInterval={id:string;task_id:string;timer_id:string;unit_id:string;user_id:string;started_at:string;ended_at:string|null;reason:string}
+export const localDay=()=>new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Kathmandu'})
+export function periodBounds(kind:'Daily'|'Weekly'|'Monthly',day:string){
+ const d=new Date(`${day}T12:00:00Z`);if(Number.isNaN(d.getTime()))return {start:day,end:day}
+ if(kind==='Weekly'){d.setUTCDate(d.getUTCDate()-d.getUTCDay());const first=d.toISOString().slice(0,10);d.setUTCDate(d.getUTCDate()+6);return {start:first,end:d.toISOString().slice(0,10)}}
+ if(kind==='Monthly'){return {start:day.slice(0,7)+'-01',end:new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,0)).toISOString().slice(0,10)}}
+ return {start:day,end:day}
+}
+export function useWorkPlans(){const {unitId}=useUnit();return useQuery({queryKey:['work_plans',unitId],queryFn:async()=>{let q=supabase.from('work_plans').select('*').order('period_start',{ascending:false}).limit(300);if(unitId)q=q.eq('unit_id',unitId);const{data,error}=await q;if(error)throw error;return (data||[]) as WorkPlan[]}})}
+export function useWorkPlanItems(){const {unitId}=useUnit();return useQuery({queryKey:['work_plan_items',unitId],queryFn:async()=>{const {data,error}=await supabase.from('work_plan_items').select('*,work_plans!inner(unit_id),tasks(title,task_no,status,completed_at,due_date,progress,task_assignees(user_id))').order('planned_date').limit(900);if(error)throw error;return (data||[]).filter((x:any)=>!unitId||x.work_plans?.unit_id===unitId) as WorkPlanItem[]}})}
+export function useHolidays(){const {unitId}=useUnit();return useQuery({queryKey:['work_holidays',unitId],queryFn:async()=>{let q=supabase.from('work_holidays').select('*').order('start_date',{ascending:false}).limit(400);if(unitId)q=q.eq('unit_id',unitId);const{data,error}=await q;if(error)throw error;return (data||[]) as Holiday[]}})}
+export function useWorkCalendars(){const {unitId}=useUnit();return useQuery({queryKey:['working_calendars',unitId],queryFn:async()=>{let q=supabase.from('working_calendars').select('unit_id,weekly_off');if(unitId)q=q.eq('unit_id',unitId);const{data,error}=await q;if(error)throw error;return(data||[]) as WorkCalendar[]}})}
+export function useTaskClocks(){const {unitId}=useUnit();return useQuery({queryKey:['task_elapsed_clocks',unitId],queryFn:async()=>{let q=supabase.from('task_elapsed_clocks').select('*').order('started_at',{ascending:false}).limit(600);if(unitId)q=q.eq('unit_id',unitId);const{data,error}=await q;if(error)throw error;return(data||[]) as TaskClock[]},refetchInterval:15000})}
+export function useBreakIntervals(){const {unitId}=useUnit();return useQuery({queryKey:['staff_break_intervals',unitId],queryFn:async()=>{let q=supabase.from('staff_break_intervals').select('*').order('started_at',{ascending:false}).limit(600);if(unitId)q=q.eq('unit_id',unitId);const{data,error}=await q;if(error)throw error;return(data||[]) as BreakInterval[]},refetchInterval:15000})}
+export function clockSeconds(clock:TaskClock|null|undefined,now=Date.now()){return clock?Math.max(0,Math.floor((new Date(clock.stopped_at||now).getTime()-new Date(clock.started_at).getTime())/1000)):0}
+export function breakSeconds(b:BreakInterval,now=Date.now()){return Math.max(0,Math.floor((new Date(b.ended_at||now).getTime()-new Date(b.started_at).getTime())/1000))}
+export function isHoliday(day:string,unitId:string,calendar:WorkCalendar[],holidays:Holiday[]){const dayNum=new Date(day+'T12:00:00Z').getUTCDay();return (calendar.find(c=>c.unit_id===unitId)?.weekly_off||[6]).includes(dayNum)||holidays.some(h=>h.active&&h.unit_id===unitId&&day>=h.start_date&&day<=h.end_date)}
+export function exportRowsCsv(filename:string,headers:string[],rows:(string|number|null|undefined)[][]){const csv=[headers,...rows].map(r=>r.map(v=>'"'+String(v??'').replaceAll('"','""')+'"').join(',')).join('\r\n');const url=URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=filename;a.click();setTimeout(()=>URL.revokeObjectURL(url),500)}

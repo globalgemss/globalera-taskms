@@ -240,3 +240,16 @@ Admin / delegated Unit Manager starts an assignee's work timer from Task Details
 Desktop Tasks includes Board / Table / Cards. Mobile Staff Home shows the bright blue active timer widget. `Time Tracking` is on the sidebar, includes unit-scoped metrics and a CSV export. Timer state uses Supabase RLS and Edge Function control, with database-side atomic operations.
 
 **Do not call the system security-audited or fully production accepted until real multi-user phone QR/PIN sessions, refresh-session revocation after reset, role isolation, concurrent clicks and manager review are acceptance-tested.** Vite build alone does not run TypeScript typecheck. See `V3_RELEASE_REPORT.md` for current checks/limitations.
+
+## V3.2 — Work Planning + Holidays + Dual Timers
+
+Apply migration files `202610080008_v32_work_plans_holidays_clocks.sql`,
+`202610080009_v32_holiday_automation.sql` and
+`202610080010_v32_summary_fix.sql` in order to the existing GlobalEra-TaskMS Supabase project.
+Deploy the updated `task-api` Edge Function. No changes are required to your existing auth credentials.
+
+New routes: `/planning` (Daily/Weekly/Monthly Plans), `/holidays` (Saturday + unit-based custom holidays & authorizations), `/time` (Admin elapsed vs Staff active time and breaks). Default Staff Start Work is available in Task Details. Existing V3 tasks, PIN, QR and units remain intact.
+
+Important distinction: the Admin elapsed clock measures assignment to approved completion; Staff work timer starts when the assigned person presses Start Work and excludes breaks. On Saturday/extra holidays, Staff Start/Resume requires explicit approval from a manager. All key actions are server-authorized and logged.
+
+See `V3_2_RELEASE_REPORT.md` for tests, background schedules, known limitations and deployment status.

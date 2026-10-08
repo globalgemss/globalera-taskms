@@ -1,0 +1,7 @@
+import {createRequire} from 'node:module';import fs from 'node:fs';import path from 'node:path';
+const require=createRequire(import.meta.url),ts=require('/opt/nvm/versions/node/v22.16.0/lib/node_modules/typescript/lib/typescript.js');
+const dir=new URL('../src/',import.meta.url).pathname;let files=[];const walk=d=>{for(const e of fs.readdirSync(d,{withFileTypes:true})){const full=path.join(d,e.name);if(e.isDirectory())walk(full);else if(/\.tsx?$/.test(e.name)&&!e.name.endsWith('.d.ts'))files.push(full)}};walk(dir);
+const errs=[];for(const file of files){try{const source=fs.readFileSync(file,'utf8');const x=ts.transpileModule(source,{fileName:file,reportDiagnostics:true,compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2020}});for(const d of x.diagnostics||[])if(d.category===ts.DiagnosticCategory.Error)errs.push(`${path.basename(file)}: ${ts.flattenDiagnosticMessageText(d.messageText,' ')}`)}catch(e){errs.push(`${path.basename(file)}: ${e.message}`)}}
+const migration=fs.readFileSync(new URL('../supabase/migrations/202610080008_v32_work_plans_holidays_clocks.sql',import.meta.url),'utf8');
+for(const must of ['task_elapsed_clocks','work_plans','work_holidays','staff_break_intervals','taskms_timer_transition','taskms_is_holiday'])if(!migration.includes(must))errs.push(`Missing V3.2 SQL: ${must}`);
+console.log(`${files.length} TS/TSX sources checked. Error count: ${errs.length}`);for(const e of errs)console.log(e);process.exitCode=errs.length?1:0;

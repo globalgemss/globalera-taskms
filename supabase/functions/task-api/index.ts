@@ -1,6 +1,6 @@
 import {actor,audit,cors,err,hashPin,hmacLink,isPin,isTaskAccessible,notification,randHex,requireAdmin,requireManager,respond,sha256,text,timeline} from '../_shared/core.ts'
 
-const actions=['create_user','update_user','add_user_note','get_link','rotate_link','reset_pin','change_pin','create_task','update_task','assign_task','update_progress','change_status','add_note','add_followup','review_task','create_notice','toggle_notice','read_notice','complete_followup','create_project','create_department','mark_notification_read','create_unit','update_unit','set_unit_member','add_checklist','toggle_checklist','add_evidence','create_milestone','complete_milestone','create_recurring_rule','run_recurring_rules','toggle_recurring_rule','timer_transition','verify_task_time']
+const actions=['create_user','update_user','add_user_note','get_link','rotate_link','reset_pin','change_pin','create_task','update_task','assign_task','update_progress','change_status','add_note','add_followup','review_task','create_notice','toggle_notice','read_notice','complete_followup','create_project','create_department','mark_notification_read','create_unit','update_unit','set_unit_member','add_checklist','toggle_checklist','add_evidence','create_milestone','complete_milestone','create_recurring_rule','run_recurring_rules','toggle_recurring_rule','timer_transition','verify_task_time','create_work_plan','set_work_plan_status','add_work_plan_item','carry_forward_plan_item','create_holiday','set_holiday_active','set_work_calendar','authorize_holiday_work']
 const transitions:Record<string,string[]>={
  New:['Assigned','Cancelled'],Assigned:['In Progress','On Hold','Cancelled'],
  'In Progress':['Waiting','On Hold','Review','Cancelled'],Waiting:['In Progress','On Hold','Cancelled'],
@@ -257,9 +257,9 @@ Deno.serve(async(req)=>{
     const target=String(body.user_id||myId)
     const m=await membership(myId,t.unit_id)
     const canControl=profile.role==='admin'||Boolean(m&&['manager','unit_admin'].includes(m.role))
-    if(['start','stop'].includes(act)&&!canControl)throw Error('Admin or authorized manager must start/stop task timers')
+    if(act==='stop'&&!canControl)throw Error('Only Admin/Manager can stop another work timer')
     if(!canControl&&target!==myId)throw Error('Staff can only pause/resume their own task timer')
-    if(!canControl&& !['pause','resume'].includes(act))throw Error('Timer action not permitted')
+    if(!canControl&& !['start','pause','resume'].includes(act))throw Error('Timer action not permitted')
     const {data:assigned}=await admin.from('task_assignees').select('user_id').eq('task_id',t.id).eq('user_id',target).maybeSingle()
     if(!assigned)throw Error('Selected user is not assigned to the task')
     const reqId=String(body.request_id||'')
@@ -271,7 +271,7 @@ Deno.serve(async(req)=>{
     })
     if(error)throw Error(error.message)
     await audit(admin,myId,'TIMER_'+act.toUpperCase(),'task',t.id,{staff_id:target,reason})
-    if(act==='start')await notification(admin,[target],'Work timer started',t.title,t.id)
+    if(act==='start'&&target!==myId)await notification(admin,[target],'Work timer started',t.title,t.id)
     return respond({timer:data,success:true})
    }
    case 'verify_task_time':{
@@ -304,7 +304,7 @@ Deno.serve(async(req)=>{
       if(se)throw Error(se.message)
       return respond({success:true})
     }
-    if(next==='In Progress'&&t.status==='Assigned')throw Error('Work must be started by an authorized manager using Start Timer')
+    if(next==='In Progress'&&t.status==='Assigned')throw Error('Use Start Work to begin work time tracking')
     const {error}=await admin.from('tasks').update({status:next,completed_at:next==='Completed'?new Date().toISOString():null,completed_by:next==='Completed'?myId:null}).eq('id',t.id)
     if(error)throw Error(error.message)
     await timeline(admin,t.id,myId,'Status Changed',`${t.status} → ${next}`)
@@ -464,7 +464,7 @@ Deno.serve(async(req)=>{
     const title=text(body.title,180),frequency=text(body.frequency,20),next_run=String(body.next_run||'')
     if(title.length<3||!['Daily','Weekly','Monthly'].includes(frequency)||!/^\d{4}-\d{2}-\d{2}$/.test(next_run))throw Error('Valid recurring task title, frequency and first date required')
     const ids=await checkAssignees([String(body.assignee_id||'')],unitId)
-    const {data,error}=await admin.from('recurring_rules').insert({unit_id:unitId,title,description:text(body.description,3000),priority:body.priority||'Normal',assignee_id:ids[0],frequency,next_run,created_by:myId}).select('id').single()
+    const {data,error}=await admin.from('recurring_rules').insert({unit_id:unitId,title,description:text(body.description,3000),priority:body.priority||'Normal',assignee_id:ids[0],frequency,next_run,holiday_behavior:['Next Working Day','Skip'].includes(String(body.holiday_behavior))?body.holiday_behavior:'Next Working Day',created_by:myId}).select('id').single()
     if(error)throw Error(error.message);return respond({id:data.id})
    }
    case 'toggle_recurring_rule':{
@@ -476,26 +476,102 @@ Deno.serve(async(req)=>{
    }
    case 'run_recurring_rules':{
     adminOnly()
-    const now=new Date(),today=now.toLocaleDateString('sv-SE',{timeZone:'Asia/Kathmandu'}),{data:rules,error:e}=await admin.from('recurring_rules').select('*').eq('active',true).lte('next_run',today).limit(50)
-    if(e)throw Error(e.message)
-    let created=0
-    for(const rule of rules||[]){
-     const date=rule.next_run
-     const {error:lockError}=await admin.from('automation_runs').insert({rule_id:rule.id,run_date:date,status:'Pending'})
-     if(lockError)continue // unique(rule_id,run_date) protects against double execution
-     try{
-      const {data:t,error:te}=await admin.from('tasks').insert({title:rule.title,description:rule.description,unit_id:rule.unit_id,priority:rule.priority,created_by:rule.created_by,supervisor_id:rule.created_by,status:'Assigned',due_date:date}).select('id,task_no').single()
-      if(te||!t)throw Error(te?.message||'Task creation failed')
-      const {error:ae}=await admin.from('task_assignees').insert({task_id:t.id,user_id:rule.assignee_id,assigned_by:myId})
-      if(ae)throw Error(ae.message)
-      await timeline(admin,t.id,myId,'Recurring Task Created',`From recurring rule ${rule.id}`)
-      const d=new Date(date+'T12:00:00Z');if(rule.frequency==='Daily')d.setUTCDate(d.getUTCDate()+1);else if(rule.frequency==='Weekly')d.setUTCDate(d.getUTCDate()+7);else d.setUTCMonth(d.getUTCMonth()+1)
-      await admin.from('recurring_rules').update({next_run:d.toISOString().slice(0,10),last_run:date}).eq('id',rule.id)
-      await admin.from('automation_runs').update({status:'Created',task_id:t.id}).eq('rule_id',rule.id).eq('run_date',date)
-      await notification(admin,[rule.assignee_id],'Recurring task assigned',rule.title,t.id);created++
-     }catch(ex){await admin.from('automation_runs').update({status:'Error'}).eq('rule_id',rule.id).eq('run_date',date)}
-    }
-    return respond({created,checked:rules?.length||0})
+    // Use the same transactional, holiday-aware generator as the scheduled cron.
+    const {data,error}=await admin.rpc('taskms_run_due_recurring_rules')
+    if(error)throw Error(error.message)
+    return respond({created:data||0})
+   }
+   case 'set_work_calendar':{
+    adminOnly()
+    const unitId=await mustUnit(body.unit_id)
+    const weekly=Array.isArray(body.weekly_off)?body.weekly_off.map(Number):[6]
+    if(weekly.some(n=>!Number.isInteger(n)||n<0||n>6)||new Set(weekly).size!==weekly.length)throw Error('Invalid weekly holiday days')
+    const {error}=await admin.from('working_calendars').upsert({unit_id:unitId,weekly_off:weekly,updated_by:myId,updated_at:new Date().toISOString()})
+    if(error)throw Error(error.message)
+    await audit(admin,myId,'WORK_CALENDAR_UPDATED','unit',unitId,{weekly_off:weekly})
+    return respond({success:true})
+   }
+   case 'create_holiday':{
+    adminOnly()
+    const unitId=await mustUnit(body.unit_id),title=text(body.title,180),from=String(body.start_date||''),to=String(body.end_date||from)
+    if(title.length<2||!/^\d{4}-\d{2}-\d{2}$/.test(from)||!/^\d{4}-\d{2}-\d{2}$/.test(to)||to<from)throw Error('Valid title and date range required')
+    if((Date.parse(to)-Date.parse(from))/86400000>366)throw Error('Holiday range cannot exceed 366 days')
+    const {data,error}=await admin.from('work_holidays').insert({unit_id:unitId,title,start_date:from,end_date:to,notes:text(body.notes,1000)||null,created_by:myId}).select('id').single()
+    if(error)throw Error(error.message)
+    await audit(admin,myId,'HOLIDAY_CREATED','work_holiday',data.id,{unit_id:unitId,from,to})
+    return respond({holiday:data})
+   }
+   case 'set_holiday_active':{
+    adminOnly()
+    const {data:h,error:he}=await admin.from('work_holidays').select('id,unit_id').eq('id',body.holiday_id).single()
+    if(he||!h)throw Error('Holiday not found')
+    const {error}=await admin.from('work_holidays').update({active:body.active===true}).eq('id',h.id)
+    if(error)throw Error(error.message)
+    await audit(admin,myId,'HOLIDAY_UPDATED','work_holiday',h.id,{active:body.active===true})
+    return respond({success:true})
+   }
+   case 'authorize_holiday_work':{
+    const t=await taskManager(),userId=String(body.user_id||''),day=String(body.work_date||''),reason=text(body.reason,1000)
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(day)||reason.length<3)throw Error('Work date and reason required')
+    await requireUnitUser(userId,t.unit_id)
+    const {data:assigned}=await admin.from('task_assignees').select('user_id').eq('task_id',t.id).eq('user_id',userId).maybeSingle()
+    if(!assigned)throw Error('User must be assigned to task')
+    const {error}=await admin.from('holiday_work_authorizations').upsert({unit_id:t.unit_id,task_id:t.id,user_id:userId,work_date:day,reason,authorized_by:myId},{onConflict:'task_id,user_id,work_date'})
+    if(error)throw Error(error.message)
+    await timeline(admin,t.id,myId,'Holiday Work Approved',`Authorized holiday work on ${day}: ${reason}`)
+    await notification(admin,[userId],'Holiday work approved',`${t.title} · ${day}`,t.id)
+    return respond({success:true})
+   }
+   case 'create_work_plan':{
+    managerOnly()
+    const unitId=await mustUnit(body.unit_id);await canManage(unitId)
+    const title=text(body.title,180),kind=String(body.period_type||''),start=String(body.period_start||''),end=String(body.period_end||'')
+    if(title.length<2||!['Daily','Weekly','Monthly'].includes(kind)||!/^\d{4}-\d{2}-\d{2}$/.test(start)||!/^\d{4}-\d{2}-\d{2}$/.test(end)||end<start)throw Error('Enter valid work plan title and period')
+    const days=(Date.parse(end)-Date.parse(start))/86400000+1
+    if(!Number.isInteger(days)||days>(kind==='Daily'?1:kind==='Weekly'?7:32)||days<1)throw Error('Invalid planning period length')
+    const {data,error}=await admin.from('work_plans').insert({unit_id:unitId,title,period_type:kind,period_start:start,period_end:end,description:text(body.description,1000)||null,created_by:myId}).select('id').single()
+    if(error)throw Error(error.message)
+    return respond({plan:data})
+   }
+   case 'set_work_plan_status':{
+    const {data:plan,error:pe}=await admin.from('work_plans').select('id,unit_id,status').eq('id',body.plan_id).single()
+    if(pe||!plan)throw Error('Plan not found');await canManage(plan.unit_id)
+    const status=String(body.status||'');if(!['Draft','Published','Archived'].includes(status))throw Error('Invalid plan status')
+    const {error}=await admin.from('work_plans').update({status,updated_at:new Date().toISOString()}).eq('id',plan.id)
+    if(error)throw Error(error.message)
+    await admin.from('work_plan_revisions').insert({plan_id:plan.id,changed_by:myId,description:`Plan status: ${status}`})
+    return respond({success:true})
+   }
+   case 'add_work_plan_item':{
+    const {data:plan,error:pe}=await admin.from('work_plans').select('*').eq('id',body.plan_id).single()
+    if(pe||!plan)throw Error('Plan not found');await canManage(plan.unit_id)
+    if(plan.status==='Archived')throw Error('Cannot edit an archived plan')
+    const taskId=String(body.task_id||''),date=String(body.planned_date||'')
+    const {data:t}=await admin.from('tasks').select('id,unit_id').eq('id',taskId).maybeSingle()
+    if(!t||t.unit_id!==plan.unit_id)throw Error('Task must belong to plan business unit')
+    if(date<plan.period_start||date>plan.period_end)throw Error('Planned date must be inside plan period')
+    const minutes=Number(body.planned_minutes||0)
+    if(!Number.isInteger(minutes)||minutes<0||minutes>100000)throw Error('Invalid estimate')
+    const {data:item,error}=await admin.from('work_plan_items').insert({plan_id:plan.id,task_id:taskId,planned_date:date,planned_minutes:minutes,target_outcome:text(body.target_outcome,1000)||null}).select('id').single()
+    if(error)throw Error(error.message)
+    await admin.from('work_plan_revisions').insert({plan_id:plan.id,item_id:item.id,changed_by:myId,description:`Planned task ${taskId} for ${date}`})
+    return respond({item})
+   }
+   case 'carry_forward_plan_item':{
+    const {data:source,error:se}=await admin.from('work_plan_items').select('*,work_plans!inner(unit_id)').eq('id',body.item_id).single()
+    const {data:plan,error:pe}=await admin.from('work_plans').select('*').eq('id',body.target_plan_id).single()
+    if(se||pe||!source||!plan)throw Error('Plan item or destination not found')
+    await canManage(plan.unit_id)
+    if(source.work_plans?.unit_id!==plan.unit_id||source.plan_id===plan.id)throw Error('Carry forward requires another plan in the same unit')
+    if(plan.status==='Archived')throw Error('Destination plan archived')
+    const date=String(body.planned_date||plan.period_start)
+    if(date<plan.period_start||date>plan.period_end)throw Error('Date outside destination period')
+    const {data:t}=await admin.from('tasks').select('status').eq('id',source.task_id).single()
+    if(t?.status==='Completed'||t?.status==='Cancelled')throw Error('Closed tasks cannot be carried forward')
+    const {data:item,error}=await admin.from('work_plan_items').insert({plan_id:plan.id,task_id:source.task_id,planned_date:date,planned_minutes:source.planned_minutes,target_outcome:source.target_outcome,carried_from_id:source.id}).select('id').single()
+    if(error)throw Error(error.message)
+    await admin.from('work_plan_revisions').insert({plan_id:plan.id,item_id:item.id,changed_by:myId,description:`Carried forward from plan ${source.plan_id}; original plan preserved`})
+    return respond({item})
    }
    case 'mark_notification_read':{
     const {error}=await admin.from('notifications').update({read_at:new Date().toISOString()}).eq('id',body.notification_id).eq('user_id',myId)
