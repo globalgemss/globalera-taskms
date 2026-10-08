@@ -1,6 +1,6 @@
 import {actor,audit,cors,err,hashPin,hmacLink,isPin,isTaskAccessible,notification,randHex,requireAdmin,requireManager,respond,sha256,text,timeline} from '../_shared/core.ts'
 
-const actions=['create_user','update_user','add_user_note','get_link','rotate_link','reset_pin','change_pin','create_task','update_task','assign_task','update_progress','change_status','add_note','add_followup','review_task','create_notice','toggle_notice','read_notice','complete_followup','create_project','create_department','mark_notification_read']
+const actions=['create_user','update_user','add_user_note','get_link','rotate_link','reset_pin','change_pin','create_task','update_task','assign_task','update_progress','change_status','add_note','add_followup','review_task','create_notice','toggle_notice','read_notice','complete_followup','create_project','create_department','mark_notification_read','create_unit','update_unit','set_unit_member','add_checklist','toggle_checklist','add_evidence','create_milestone','complete_milestone','create_recurring_rule','run_recurring_rules','toggle_recurring_rule']
 const transitions:Record<string,string[]>={
  New:['Assigned','Cancelled'],Assigned:['In Progress','On Hold','Cancelled'],
  'In Progress':['Waiting','On Hold','Review','Cancelled'],Waiting:['In Progress','On Hold','Cancelled'],
@@ -19,11 +19,21 @@ Deno.serve(async(req)=>{
   const adminOnly=()=>requireAdmin(profile.role)
   const managerOnly=()=>requireManager(profile.role)
   const task=async()=>isTaskAccessible(admin,profile,String(body.task_id||''),true)
-  const checkAssignees=async(ids:string[])=>{
+  const trainingUnit=async()=>{const {data,error}=await admin.from('business_units').select('id').eq('code','TRAINING').single();if(error||!data)throw Error('Default unit missing');return data.id as string}
+  const mustUnit=async(raw:unknown)=>{const id=String(raw||await trainingUnit());const {data:u}=await admin.from('business_units').select('id,status').eq('id',id).maybeSingle();if(!u||u.status!=='Active')throw Error('Business unit unavailable');return id}
+  const membership=async(uid:string,unit:string)=>{const {data:m}=await admin.from('unit_memberships').select('role,status').eq('unit_id',unit).eq('user_id',uid).eq('status','Active').maybeSingle();return m}
+  const canManage=async(unit:string)=>{if(profile.role==='admin')return;const m=await membership(myId,unit);if(!m||!['manager','unit_admin'].includes(m.role))throw Error('Manager access required for this business unit')}
+  const canView=async(unit:string)=>{if(profile.role==='admin')return;if(!await membership(myId,unit))throw Error('No access to this business unit')}
+  const taskManager=async()=>{const t=await task();await canManage(t.unit_id);return t}
+  const validateProject=async(pid:unknown,unit:string)=>{if(!pid)return null;const {data}=await admin.from('projects').select('id,unit_id').eq('id',pid).maybeSingle();if(!data||data.unit_id!==unit)throw Error('Project does not belong to selected business unit');return data.id}
+
+  const checkAssignees=async(ids:string[],unit:string)=>{
    if(!ids.length)throw Error('Select at least one assignee')
    const unique=[...new Set(ids)]
    const {data, error}=await admin.from('profiles').select('id,status,manager_id').in('id',unique)
    if(error||!data||data.length!==unique.length||data.some(u=>u.status!=='Active'))throw Error('An assignee is invalid or inactive')
+   const {data:members,error:membersError}=await admin.from('unit_memberships').select('user_id').eq('unit_id',unit).eq('status','Active').in('user_id',unique)
+   if(membersError||!members||members.length!==unique.length)throw Error('All assignees must belong to the selected business unit')
    if(profile.role==='manager'&&data.some(u=>u.manager_id!==myId&&u.id!==myId))throw Error('You may assign only your own team')
    return unique
   }
@@ -40,12 +50,15 @@ Deno.serve(async(req)=>{
     const phone=text(body.phone,30),alternate_phone=text(body.alternate_phone,30)
     if(phone&&!/^[+\d()\-\s]{7,22}$/.test(phone))throw Error('Enter a valid phone number')
     // Each staff has an internal Auth identity so their RLS policies work correctly.
+    const unitId=await mustUnit(body.unit_id)
     const tempPassword=randHex(18)+'A!'
     const {data:created,error:ce}=await admin.auth.admin.createUser({email,password:tempPassword,email_confirm:true,user_metadata:{full_name}})
     if(ce||!created.user)throw Error(ce?.message||'Could not create auth account')
     const newId=created.user.id
     const {data:updated,error:ue}=await admin.from('profiles').update({full_name,email,role,phone:phone||null,alternate_phone:alternate_phone||null,address:text(body.address,500)||null,joining_date:body.joining_date||null,designation:text(body.designation,80)||null,department_id:body.department_id||null,manager_id:body.manager_id||null}).eq('id',newId).select('id,user_code,full_name,email,role').single()
     if(ue){await admin.auth.admin.deleteUser(newId);throw Error(ue.message)}
+    const {error:membershipError}=await admin.from('unit_memberships').insert({user_id:newId,unit_id:unitId,role:role==='admin'?'unit_admin':role==='manager'?'manager':'staff'})
+    if(membershipError){await admin.auth.admin.deleteUser(newId);throw Error('Unit membership failed: '+membershipError.message)}
     let access:Record<string,unknown>={}
     if(role==='staff'){
      try{
@@ -152,11 +165,13 @@ Deno.serve(async(req)=>{
    }
    case 'create_task':{
     managerOnly()
-    const title=text(body.title,220),assignees=await checkAssignees(Array.isArray(body.assignees)?body.assignees:[])
+    const unitId=await mustUnit(body.unit_id);await canManage(unitId)
+    const title=text(body.title,220),assignees=await checkAssignees(Array.isArray(body.assignees)?body.assignees:[],unitId)
+    const projectId=await validateProject(body.project_id,unitId)
     if(title.length<3)throw Error('Task title must be at least 3 characters')
     const priority=text(body.priority,20)||'Normal'
     if(!['Low','Normal','High','Urgent'].includes(priority))throw Error('Invalid priority')
-    const insert={title,description:text(body.description,8000)||null,project_id:body.project_id||null,priority,
+    const insert={title,description:text(body.description,8000)||null,project_id:projectId,unit_id:unitId,priority,
       start_date:body.start_date||null,due_date:body.due_date||null,
       due_time:body.due_time||null,created_by:myId,supervisor_id:body.supervisor_id||myId,status:'Assigned'}
     const requestId=String(body.client_request_id||'')
@@ -173,10 +188,11 @@ Deno.serve(async(req)=>{
     return respond({task:created})
    }
    case 'update_task':{
-    managerOnly();const t=await task()
+    const t=await taskManager()
     if(profile.role==='manager'&&t.created_by!==myId&&t.supervisor_id!==myId)throw Error('Only owner/supervisor may edit this task')
     const patch:Record<string,unknown>={}
     for(const key of ['title','description','priority','due_date','due_time','start_date','project_id'])if(Object.hasOwn(body,key))patch[key]=body[key]||null
+    if(Object.hasOwn(patch,'project_id'))patch.project_id=await validateProject(patch.project_id,t.unit_id)
     if(patch.title && text(patch.title).length<3)throw Error('Title too short')
     if(patch.priority&&!['Low','Normal','High','Urgent'].includes(String(patch.priority)))throw Error('Invalid priority')
     if(t.status==='Completed'||t.status==='Cancelled')throw Error('Reopen task before editing')
@@ -186,10 +202,10 @@ Deno.serve(async(req)=>{
     return respond({success:true})
    }
    case 'assign_task':{
-    managerOnly();const t=await task()
+    const t=await taskManager()
     if(profile.role==='manager'&&t.created_by!==myId&&t.supervisor_id!==myId)throw Error('Only owner/supervisor may reassign')
     if(['Completed','Cancelled'].includes(t.status))throw Error('Cannot assign a closed task')
-    const ids=await checkAssignees(Array.isArray(body.assignees)?body.assignees:[])
+    const ids=await checkAssignees(Array.isArray(body.assignees)?body.assignees:[],t.unit_id)
     const {data:prev}=await admin.from('task_assignees').select('user_id').eq('task_id',t.id)
     const old=(prev||[]).map(x=>x.user_id)
     const additions=ids.filter(id=>!old.includes(id)),removals=old.filter(id=>!ids.includes(id))
@@ -223,9 +239,9 @@ Deno.serve(async(req)=>{
    case 'change_status':{
     const t=await task();const next=String(body.status||'')
     if(!transitions[t.status]?.includes(next))throw Error(`Invalid transition ${t.status} → ${next}`)
-    if((next==='Completed'||t.status==='Completed'||next==='Cancelled')&&!['admin','manager'].includes(profile.role))throw Error('Manager approval required')
+    if(next==='Completed'||t.status==='Completed'||next==='Cancelled')await canManage(t.unit_id)
     if(t.status==='Review'&&next==='Completed')throw Error('Use Review Approve action')
-    if(t.status==='Review'&&next==='In Progress'&&!['admin','manager'].includes(profile.role))throw Error('Manager must return task')
+    if(t.status==='Review'&&next==='In Progress')await canManage(t.unit_id)
     const {error}=await admin.from('tasks').update({status:next,completed_at:next==='Completed'?new Date().toISOString():null,completed_by:next==='Completed'?myId:null}).eq('id',t.id)
     if(error)throw Error(error.message)
     await timeline(admin,t.id,myId,'Status Changed',`${t.status} → ${next}`)
@@ -249,7 +265,7 @@ Deno.serve(async(req)=>{
     return respond({success:true})
    }
    case 'review_task':{
-    managerOnly();const t=await task()
+    const t=await taskManager()
     if(t.status!=='Review')throw Error('Only a task in Review can be decided')
     const decision=String(body.decision||'')
     if(!['Approved','Returned'].includes(decision))throw Error('Invalid review decision')
@@ -266,17 +282,18 @@ Deno.serve(async(req)=>{
    }
    case 'create_notice':{
     adminOnly()
+    const unitId=await mustUnit(body.unit_id);await canManage(unitId)
     const title=text(body.title,180),message=text(body.message,4000),target_type=String(body.target_type||'all')
     if(!title||!message)throw Error('Title and message required')
     if(!['all','user','department','manager_team'].includes(target_type))throw Error('Invalid target type')
     if(target_type==='user'&&!body.target_user_id||target_type==='department'&&!body.target_department_id||target_type==='manager_team'&&!body.target_manager_id)throw Error('Target selection is required')
-    const {data,error}=await admin.from('notices').insert({title,message,priority:body.priority||'Normal',target_type,target_user_id:target_type==='user'?body.target_user_id||null:null,target_department_id:target_type==='department'?body.target_department_id||null:null,target_manager_id:target_type==='manager_team'?body.target_manager_id||null:null,start_date:body.start_date||null,end_date:body.end_date||null,created_by:myId}).select('id').single()
+    const {data,error}=await admin.from('notices').insert({unit_id:unitId,title,message,priority:body.priority||'Normal',target_type,target_user_id:target_type==='user'?body.target_user_id||null:null,target_department_id:target_type==='department'?body.target_department_id||null:null,target_manager_id:target_type==='manager_team'?body.target_manager_id||null:null,start_date:body.start_date||null,end_date:body.end_date||null,created_by:myId}).select('id').single()
     if(error)throw Error(error.message)
     await audit(admin,myId,'NOTICE_CREATED','notice',data.id)
     return respond({id:data.id})
    }
    case 'toggle_notice':{
-    adminOnly();const {error}=await admin.from('notices').update({is_active:Boolean(body.is_active)}).eq('id',body.notice_id)
+    const {data:notice}=await admin.from('notices').select('unit_id').eq('id',body.notice_id).maybeSingle();if(!notice)throw Error('Notice not found');await canManage(notice.unit_id);const {error}=await admin.from('notices').update({is_active:Boolean(body.is_active)}).eq('id',body.notice_id)
     if(error)throw Error(error.message)
     return respond({success:true})
    }
@@ -286,6 +303,7 @@ Deno.serve(async(req)=>{
     const {data:n}=await admin.from('notices').select('*').eq('id',id).maybeSingle()
     if(!n||!n.is_active||n.start_date&&n.start_date>new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Kathmandu'})||n.end_date&&n.end_date<new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Kathmandu'}))throw Error('Notice unavailable')
     const allowed=n.target_type==='all'||n.target_type==='user'&&n.target_user_id===myId||n.target_type==='department'&&n.target_department_id===profile.department_id||n.target_type==='manager_team'&&(n.target_manager_id===profile.manager_id||n.target_manager_id===myId)||profile.role==='admin'
+    await canView(n.unit_id)
     if(!allowed)throw Error('Not authorized to read notice')
     const {error}=await admin.from('notice_reads').upsert({notice_id:id,user_id:myId},{onConflict:'notice_id,user_id'})
     if(error)throw Error(error.message)
@@ -304,20 +322,111 @@ Deno.serve(async(req)=>{
     return respond({success:true})
    }
    case 'create_project':{
-    managerOnly()
+    const unitId=await mustUnit(body.unit_id);await canManage(unitId)
     const name=text(body.name,180)
     if(name.length<3)throw Error('Project name too short')
-    const {data,error}=await admin.from('projects').insert({name,description:text(body.description,1500)||null,manager_id:profile.role==='admin'?body.manager_id||myId:myId}).select('id,project_no,name').single()
+    const {data,error}=await admin.from('projects').insert({name,unit_id:unitId,description:text(body.description,1500)||null,manager_id:profile.role==='admin'?body.manager_id||myId:myId}).select('id,project_no,name').single()
     if(error)throw Error(error.message)
     await audit(admin,myId,'PROJECT_CREATED','project',data.id)
     return respond({project:data})
    }
    case 'create_department':{
-    adminOnly();const name=text(body.name,100)
+    const unitId=await mustUnit(body.unit_id);await canManage(unitId);const name=text(body.name,100)
     if(name.length<2)throw Error('Department name required')
-    const {data,error}=await admin.from('departments').insert({name}).select('id,name').single()
+    const {data,error}=await admin.from('departments').insert({name,unit_id:unitId}).select('id,name').single()
     if(error)throw Error(error.message)
     return respond({department:data})
+   }
+   case 'create_unit':{
+    adminOnly();const name=text(body.name,160),code=text(body.code,40).toUpperCase().replace(/[^A-Z0-9_]/g,'_')
+    if(name.length<3||code.length<2)throw Error('Unit name/code required')
+    const {data,error}=await admin.from('business_units').insert({name,code,description:text(body.description,1000)||null,color:/^#[a-f0-9]{6}$/i.test(String(body.color))?body.color:'#2463eb'}).select('id,name,code').single()
+    if(error)throw Error(error.message);await audit(admin,myId,'UNIT_CREATED','unit',data.id);return respond({unit:data})
+   }
+   case 'update_unit':{
+    adminOnly();const unitId=await mustUnit(body.unit_id),patch:Record<string,unknown>={}
+    for(const k of ['name','description','status','color'])if(Object.hasOwn(body,k))patch[k]=body[k]
+    if(patch.status&&!['Active','Inactive'].includes(String(patch.status)))throw Error('Invalid unit status')
+    const {error}=await admin.from('business_units').update(patch).eq('id',unitId)
+    if(error)throw Error(error.message);await audit(admin,myId,'UNIT_UPDATED','unit',unitId);return respond({success:true})
+   }
+   case 'set_unit_member':{
+    adminOnly();const unitId=await mustUnit(body.unit_id),uid=String(body.user_id||''),role=String(body.role||'staff'),active=body.status!=='Inactive'
+    if(!['unit_admin','manager','staff','viewer'].includes(role))throw Error('Invalid unit role')
+    const {data:target}=await admin.from('profiles').select('id').eq('id',uid).maybeSingle();if(!target)throw Error('User not found')
+    if(uid===myId&&!active)throw Error('Cannot deactivate your own unit membership')
+    const {error}=await admin.from('unit_memberships').upsert({unit_id:unitId,user_id:uid,role,status:active?'Active':'Inactive'},{onConflict:'unit_id,user_id'})
+    if(error)throw Error(error.message)
+    await audit(admin,myId,'UNIT_MEMBERSHIP_UPDATED','profile',uid,{unit_id:unitId,role,active});return respond({success:true})
+   }
+   case 'add_checklist':{
+    const t=await task(),label=text(body.label,400)
+    if(label.length<2)throw Error('Checklist item required')
+    const {data,error}=await admin.from('task_checklist').insert({task_id:t.id,label,created_by:myId}).select('id').single()
+    if(error)throw Error(error.message);await timeline(admin,t.id,myId,'Checklist Added',label);return respond({id:data.id})
+   }
+   case 'toggle_checklist':{
+    const t=await task(),id=String(body.item_id||''),done=Boolean(body.is_done)
+    const {data,error}=await admin.from('task_checklist').update({is_done:done,done_by:done?myId:null,done_at:done?new Date().toISOString():null}).eq('id',id).eq('task_id',t.id).select('id').maybeSingle()
+    if(error||!data)throw Error(error?.message||'Checklist item not found')
+    await timeline(admin,t.id,myId,'Checklist Updated',done?'Item completed':'Item reopened');return respond({success:true})
+   }
+   case 'add_evidence':{
+    const t=await task(),label=text(body.label,180),url=text(body.url,2000)
+    if(!/^https:\/\/[^\s]+$/i.test(url)||!label)throw Error('Evidence requires label and HTTPS link')
+    const {data,error}=await admin.from('task_evidence').insert({task_id:t.id,label,url,kind:'Link',created_by:myId}).select('id').single()
+    if(error)throw Error(error.message);await timeline(admin,t.id,myId,'Evidence Added',label);return respond({id:data.id})
+   }
+   case 'create_milestone':{
+    const {data:p}=await admin.from('projects').select('id,unit_id').eq('id',body.project_id).maybeSingle()
+    if(!p)throw Error('Project not found');await canManage(p.unit_id)
+    const title=text(body.title,180);if(title.length<3)throw Error('Milestone title required')
+    const {data,error}=await admin.from('project_milestones').insert({project_id:p.id,title,due_date:body.due_date||null}).select('id').single()
+    if(error)throw Error(error.message);return respond({id:data.id})
+   }
+   case 'complete_milestone':{
+    const {data:m}=await admin.from('project_milestones').select('id,projects(unit_id)').eq('id',body.milestone_id).maybeSingle()
+    if(!m)throw Error('Milestone not found');const unit=(m.projects as unknown as {unit_id:string}).unit_id;await canManage(unit)
+    const {error}=await admin.from('project_milestones').update({is_done:Boolean(body.is_done)}).eq('id',m.id)
+    if(error)throw Error(error.message);return respond({success:true})
+   }
+   case 'create_recurring_rule':{
+    const unitId=await mustUnit(body.unit_id);await canManage(unitId)
+    const title=text(body.title,180),frequency=text(body.frequency,20),next_run=String(body.next_run||'')
+    if(title.length<3||!['Daily','Weekly','Monthly'].includes(frequency)||!/^\d{4}-\d{2}-\d{2}$/.test(next_run))throw Error('Valid recurring task title, frequency and first date required')
+    const ids=await checkAssignees([String(body.assignee_id||'')],unitId)
+    const {data,error}=await admin.from('recurring_rules').insert({unit_id:unitId,title,description:text(body.description,3000),priority:body.priority||'Normal',assignee_id:ids[0],frequency,next_run,created_by:myId}).select('id').single()
+    if(error)throw Error(error.message);return respond({id:data.id})
+   }
+   case 'toggle_recurring_rule':{
+    const id=String(body.rule_id||'')
+    const {data:r}=await admin.from('recurring_rules').select('id,unit_id').eq('id',id).maybeSingle()
+    if(!r)throw Error('Recurring rule not found');await canManage(r.unit_id)
+    const {error}=await admin.from('recurring_rules').update({active:Boolean(body.active)}).eq('id',id)
+    if(error)throw Error(error.message);return respond({success:true})
+   }
+   case 'run_recurring_rules':{
+    adminOnly()
+    const now=new Date(),today=now.toLocaleDateString('sv-SE',{timeZone:'Asia/Kathmandu'}),{data:rules,error:e}=await admin.from('recurring_rules').select('*').eq('active',true).lte('next_run',today).limit(50)
+    if(e)throw Error(e.message)
+    let created=0
+    for(const rule of rules||[]){
+     const date=rule.next_run
+     const {error:lockError}=await admin.from('automation_runs').insert({rule_id:rule.id,run_date:date,status:'Pending'})
+     if(lockError)continue // unique(rule_id,run_date) protects against double execution
+     try{
+      const {data:t,error:te}=await admin.from('tasks').insert({title:rule.title,description:rule.description,unit_id:rule.unit_id,priority:rule.priority,created_by:rule.created_by,supervisor_id:rule.created_by,status:'Assigned',due_date:date}).select('id,task_no').single()
+      if(te||!t)throw Error(te?.message||'Task creation failed')
+      const {error:ae}=await admin.from('task_assignees').insert({task_id:t.id,user_id:rule.assignee_id,assigned_by:myId})
+      if(ae)throw Error(ae.message)
+      await timeline(admin,t.id,myId,'Recurring Task Created',`From recurring rule ${rule.id}`)
+      const d=new Date(date+'T12:00:00Z');if(rule.frequency==='Daily')d.setUTCDate(d.getUTCDate()+1);else if(rule.frequency==='Weekly')d.setUTCDate(d.getUTCDate()+7);else d.setUTCMonth(d.getUTCMonth()+1)
+      await admin.from('recurring_rules').update({next_run:d.toISOString().slice(0,10),last_run:date}).eq('id',rule.id)
+      await admin.from('automation_runs').update({status:'Created',task_id:t.id}).eq('rule_id',rule.id).eq('run_date',date)
+      await notification(admin,[rule.assignee_id],'Recurring task assigned',rule.title,t.id);created++
+     }catch(ex){await admin.from('automation_runs').update({status:'Error'}).eq('rule_id',rule.id).eq('run_date',date)}
+    }
+    return respond({created,checked:rules?.length||0})
    }
    case 'mark_notification_read':{
     const {error}=await admin.from('notifications').update({read_at:new Date().toISOString()}).eq('id',body.notification_id).eq('user_id',myId)

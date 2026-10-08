@@ -4,15 +4,17 @@ import {QRCodeSVG} from 'qrcode.react'
 import {toast} from 'sonner'
 import {useQuery,useQueryClient} from '@tanstack/react-query'
 import {useProfiles,useDepartments,keys} from '../lib/data'
+import {useUnit} from '../lib/units'
 import {api,supabase} from '../lib/supabase'
 import type {Profile} from '../lib/types'
 import {Badge,Btn,Card,Empty,Field,Loader,PageTitle,SearchInput,Select,Surface,TextInput,TextArea} from '../components/UI'
 import {dateLabel,initials} from '../lib/utils'
 
-type UserForm={full_name:string,email:string,phone:string,alternate_phone:string,address:string,joining_date:string,designation:string,role:string,department_id:string,manager_id:string}
-const blank=():UserForm=>({full_name:'',email:'',phone:'',alternate_phone:'',address:'',joining_date:'',designation:'',role:'staff',department_id:'',manager_id:''})
+type UserForm={full_name:string,email:string,phone:string,alternate_phone:string,address:string,joining_date:string,designation:string,role:string,department_id:string,manager_id:string,unit_id:string}
+const blank=():UserForm=>({full_name:'',email:'',phone:'',alternate_phone:'',address:'',joining_date:'',designation:'',role:'staff',department_id:'',manager_id:'',unit_id:''})
 const isInternal=(email:string)=>email.endsWith('@example.invalid')
 export default function Users(){
+ const {units,unitId}=useUnit()
  const {data:users=[],isLoading,error}=useProfiles()
  const {data:departments=[]}=useDepartments()
  const query=useQueryClient()
@@ -29,7 +31,7 @@ export default function Users(){
  const mutate=(name:keyof UserForm,value:string)=>setForm(f=>({...f,[name]:value}))
  function showQR(token:string,name:string,code:string){setQrToken(token);setQrName(name);setQrCode(code);setQrOpen(true)}
  function qrLink(token:string){return `${window.location.origin}/u/${token}`}
- function openAdd(){setForm(blank());setFormError('');setNewDepartment(false);setTempSecret('');setAddOpen(true)}
+ function openAdd(){setForm({...blank(),unit_id:unitId||units[0]?.id||''});setFormError('');setNewDepartment(false);setTempSecret('');setAddOpen(true)}
  async function create(e:React.FormEvent){
   e.preventDefault();if(busy)return
   setBusy(true);setFormError('')
@@ -49,7 +51,7 @@ export default function Users(){
   if(!departmentName.trim())return
   setCreatingDepartment(true)
   try{
-   const r=await api<{department:{id:string,name:string}}>('create_department',{name:departmentName.trim()})
+   const r=await api<{department:{id:string,name:string}}>('create_department',{name:departmentName.trim(),unit_id:form.unit_id||unitId})
    await query.invalidateQueries({queryKey:keys.departments})
    setForm(f=>({...f,department_id:r.department.id}))
    setDepartmentName('');setNewDepartment(false);toast.success('Department created')
@@ -99,7 +101,7 @@ export default function Users(){
   <Card className="list-panel"><div className="list-toolbar"><SearchInput value={search} onChange={setSearch} placeholder="Search name, ID, phone or role…"/><Select aria-label="User role filter" value={role} onChange={e=>setRole(e.target.value)}><option value="All">All Roles</option><option value="admin">Admin</option><option value="manager">Manager</option><option value="staff">Staff</option></Select><Select aria-label="User status filter" value={status} onChange={e=>setStatus(e.target.value)}><option value="All">All Status</option><option value="Active">Active</option><option value="Inactive">Inactive</option><option value="Suspended">Suspended</option></Select><div className="view-switch"><button type="button" className={view==='cards'?'active':''} aria-label="Card view" onClick={()=>setView('cards')}><LayoutGrid size={16}/></button><button type="button" className={view==='table'?'active':''} aria-label="Table view" onClick={()=>setView('table')}><LayoutList size={16}/></button></div></div>
   {isLoading?<Loader/>:error?<div className="error-box">{(error as Error).message}</div>:!filtered.length?<Empty title={users.length?'No matching users':'No team members added yet'} description="Create a team member to start assigning tasks." action={<Btn onClick={openAdd}><Plus size={16}/> Add first user</Btn>}/>:view==='cards'?<div className="user-cards">{filtered.map(u=><button key={u.id} className="user-card" onClick={()=>setDetails(u)}><div className="user-card-top"><span className="avatar user-avatar">{initials(u.full_name)}</span><Badge value={u.status}/></div><h3>{u.full_name}</h3><p>{u.designation||u.role}</p><div className="user-card-meta"><span>{u.user_code}</span><span>{u.departments?.name||'General'}</span></div><div className="user-card-bottom"><span>{isInternal(u.email)?'QR + PIN access':u.email}</span><MoreHorizontal size={19}/></div></button>)}</div>:<div className="responsive-table"><table><thead><tr><th>Team Member</th><th>Role</th><th>Department</th><th>Status</th><th>Access</th><th/></tr></thead><tbody>{filtered.map(u=><tr className="click-row" key={u.id} tabIndex={0} onClick={()=>setDetails(u)} onKeyDown={e=>e.key==='Enter'&&setDetails(u)}><td><strong>{u.full_name}</strong><small>{u.user_code} · {u.phone||u.designation||''}</small></td><td>{u.role}</td><td>{u.departments?.name||'General'}</td><td><Badge value={u.status}/></td><td>{u.role==='staff'?'QR + PIN':'Email + Password'}</td><td><MoreHorizontal size={18}/></td></tr>)}</tbody></table></div>}<div className="table-bottom">Showing {filtered.length} of {users.length} team members</div></Card>
   <Surface title="Add Team Member" description="Set up secure access and a new staff profile in one step." open={addOpen} onOpenChange={v=>!busy&&setAddOpen(v)} footer={<><Btn variant="secondary" disabled={busy} onClick={()=>setAddOpen(false)}>Cancel</Btn><Btn loading={busy} disabled={busy} form="create-user" type="submit"><CheckCircle2 size={16}/> Create User</Btn></>}>
-   <form id="create-user" className="form-stack" onSubmit={create}>
+   <form id="create-user" className="form-stack" onSubmit={create}><Field label="Business Unit *"><Select required value={form.unit_id} onChange={e=>mutate('unit_id',e.target.value)}><option value="">Select Unit</option>{units.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}</Select></Field>
     <div className="add-user-method"><Shield size={21}/><div><b>{form.role==='staff'?'Staff · QR + 4-digit PIN':'Email + strong password'}</b><small>{form.role==='staff'?'Email optional. Generate a secure personal link and PIN instantly.':'A valid email is required; a one-time password is generated.'}</small></div></div>
     {formError&&<div className="error-box" role="alert"><AlertCircle size={17}/> {formError}</div>}
     <div className="form-grid"><Field label="Full name *"><TextInput required minLength={2} placeholder="Name of the team member" value={form.full_name} onChange={e=>mutate('full_name',e.target.value)}/></Field><Field label="Role *"><Select value={form.role} onChange={e=>mutate('role',e.target.value)}><option value="staff">Staff — QR + PIN</option><option value="manager">Manager — Email / Password</option><option value="admin">Admin — Email / Password</option></Select></Field><Field label={form.role==='staff'?'Email (optional)':'Email address *'} hint={form.role==='staff'?'Leave blank for QR-only staff account. An internal login identity is created automatically.':undefined}><TextInput type="email" required={form.role!=='staff'} placeholder="name@example.com" value={form.email} onChange={e=>mutate('email',e.target.value)}/></Field><Field label="Mobile number"><TextInput type="tel" placeholder="98XXXXXXXX" value={form.phone} onChange={e=>mutate('phone',e.target.value)}/></Field><Field label="Alternate number"><TextInput type="tel" value={form.alternate_phone} onChange={e=>mutate('alternate_phone',e.target.value)}/></Field><Field label="Designation"><TextInput placeholder="Trainer / Staff / Supervisor" value={form.designation} onChange={e=>mutate('designation',e.target.value)}/></Field><Field label="Joining date"><TextInput type="date" value={form.joining_date} onChange={e=>mutate('joining_date',e.target.value)}/></Field><Field label="Department"><Select value={form.department_id} onChange={e=>mutate('department_id',e.target.value)}><option value="">General</option>{departments.map(d=><option key={d.id} value={d.id}>{d.name}</option>)}</Select><button type="button" className="inline-action" onClick={()=>setNewDepartment(x=>!x)}><Building2 size={15}/> {newDepartment?'Cancel new department':'Create department'}</button></Field><Field label="Reporting Manager"><Select value={form.manager_id} onChange={e=>mutate('manager_id',e.target.value)}><option value="">Not assigned</option>{users.filter(u=>u.role==='manager'||u.role==='admin').map(u=><option key={u.id} value={u.id}>{u.full_name}</option>)}</Select></Field></div>

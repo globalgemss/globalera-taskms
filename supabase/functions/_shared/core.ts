@@ -47,17 +47,16 @@ export async function audit(admin:ReturnType<typeof adminClient>,actorId:string,
 export function requireAdmin(role:string){if(role!=='admin')throw Error('Admin access required')}
 export function requireManager(role:string){if(!['admin','manager'].includes(role))throw Error('Manager or Admin access required')}
 export async function isTaskAccessible(admin:ReturnType<typeof adminClient>,actorProfile:{id:string,role:string},taskId:string,write=false){
- const {data:task,error}=await admin.from('tasks').select('id,title,status,progress,created_by,supervisor_id').eq('id',taskId).maybeSingle()
+ const {data:task,error}=await admin.from('tasks').select('id,title,status,progress,created_by,supervisor_id,unit_id').eq('id',taskId).maybeSingle()
  if(error||!task)throw Error('Task not found')
- if(actorProfile.role==='admin'||task.created_by===actorProfile.id||task.supervisor_id===actorProfile.id)return task
+ if(actorProfile.role==='admin')return task
+ const {data:member}=await admin.from('unit_memberships').select('role').eq('unit_id',task.unit_id).eq('user_id',actorProfile.id).eq('status','Active').maybeSingle()
+ if(!member)throw Error('Not a member of this business unit')
+ if(['unit_admin','manager'].includes(member.role)||task.created_by===actorProfile.id||task.supervisor_id===actorProfile.id)return task
  const {data:assigned}=await admin.from('task_assignees').select('user_id').eq('task_id',taskId)
  if((assigned||[]).some(x=>x.user_id===actorProfile.id)){
   if(write&&actorProfile.role==='manager')return task
   return task
- }
- if(actorProfile.role==='manager'&&assigned?.length){
-  const {data:team}=await admin.from('profiles').select('id').eq('manager_id',actorProfile.id).in('id',assigned.map(x=>x.user_id))
-  if(team?.length)return task
  }
  throw Error('Not permitted to access this task')
 }

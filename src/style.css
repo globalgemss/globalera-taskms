@@ -41,3 +41,19 @@
 .inline-action:hover{text-decoration:underline}
 @media(max-width:740px){.team-onboard{padding:16px;align-items:flex-start;flex-wrap:wrap;gap:12px}.team-onboard>div:nth-child(2){flex-basis:calc(100% - 66px)}.team-onboard>.btn{width:100%;justify-content:center}.department-create{flex-direction:column;align-items:stretch}}
 @media print{.qr-private-pin{display:none!important}}
+/* TaskMS V2: compact cross-business workspace controls */
+.unit-switcher{appearance:auto;max-width:260px;min-width:130px;border:1px solid var(--border,#e4e7ee);border-radius:12px;padding:9px 12px;background:var(--surface,#fff);color:inherit;font:inherit;font-size:12px;font-weight:650}
+.unit-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,255px),1fr));gap:14px;margin:16px 0 25px}
+.unit-grid .card{padding:18px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.unit-grid h3{font-size:16px;margin:0}.unit-grid p{font-size:13px;flex:1;min-height:40px;margin:0}
+.unit-card-heading,.unit-card-foot{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.unit-card-foot{font-size:12px;border-top:1px solid #eef0f6;padding-top:12px}
+.unit-card-foot span{display:flex;align-items:center;gap:6px;color:#7c8597}
+.unit-icon{width:40px;height:40px;display:grid;place-items:center;color:white;border-radius:13px}
+.unit-member-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #edf1f6}
+.unit-member-row>div{display:grid;gap:2px}.unit-member-row strong{font-size:13px}.unit-member-row small{color:#7c8597;font-size:11px}
+.calendar-day{padding:14px 18px;border-bottom:1px solid #edf0f4}.calendar-day h3{font-size:13px;margin:0 0 9px;color:#66748a}
+.calendar-task{width:100%;border:0;background:transparent;text-align:left;display:flex;align-items:center;gap:12px;justify-content:space-between;padding:13px 9px;border-radius:10px;color:inherit;cursor:pointer}
+.calendar-task:hover{background:#f4f7fb}.calendar-task>div{display:grid;gap:4px;flex:1;min-width:0}.calendar-task strong{overflow-wrap:anywhere;font-size:13px}.calendar-task small{font-size:11px;color:#7c8597}
+.page-action{display:flex;flex-wrap:wrap;align-items:center;gap:9px}.dashboard-section h3 svg{vertical-align:middle}
+@media(max-width:700px){.unit-switcher{max-width:140px;min-width:90px;padding:8px 6px;font-size:11px}.topbar-today{display:none}.unit-grid{grid-template-columns:1fr}.calendar-task{flex-wrap:wrap}.list-toolbar>.input{max-width:155px}}

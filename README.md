@@ -1,3 +1,34 @@
+# Global Era TaskMS V2 — Multiple Business Operations
+
+**Current upgrade:** Multi-business workspace layout, SQL unit isolation, backend authorization, project milestones, staff task checklists, evidence HTTPS links, calendar, recurring tasks (pg_cron daily 01:00 UTC = 06:45 Nepal), unit member management, roles, task lifecycle / notes / reviews / notices / follow-ups / reports.
+
+**Production resources:** Private GitHub `globalgemss/globalera-taskms`, Supabase TaskMS project `usmpjxbhrxlmlrxfnhhh` ONLY, Vercel `globalera-taskms.vercel.app`. **NEVER** apply migration to RikshaMS.
+
+## Deployment order (required)
+1. SQL migrations 001,002,003 already live before this upgrade. Run `202610080004_v2_business_units.sql` and `202610080005_v2_recurring_scheduler.sql` in order. Both additive; old records get default Training workspace.
+2. Deploy `task-api` with JWT verification enabled; deploy `staff-auth` with JWT disabled due to its separate token+PIN gate. Set `ACCESS_LINK_SECRET` server-only where possible.
+3. Deploy React/Vite from GitHub through Vercel, with existing `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`. Check deployed site and fresh login.
+4. Test Admin create staff, generate QR/PIN, staff login, assign task, progress, checklist, evidence link, submit for review, manager approval, multi-unit isolation and recurring cron.
+
+## V2 security boundaries
+- Global Admin can see all 5 seeded units; other users only access units in their active `unit_memberships`. Unit roles: `unit_admin`, `manager`, `staff`, `viewer`.
+- Row Level Security controls projects, tasks, departments, teams, notices, profiles and new tables. Direct authenticated client mutations remain prohibited; mutations pass through `task-api`.
+- Existing Admin/Manager/Staff account role lives in `profiles.role` for backward compatibility. V2 unit role governs unit management *inside the API*; Global Admin handles user provisioning. Unit-scoped user provisioning and detailed custom permission editor are still future work.
+- Staff QR uses a server-only secret; refresh token revocation and temporary credential sessions are **not production-verified**. Disable public user signup in Supabase Auth settings; use MFA/leaked-password protection where available.
+- `task_evidence` stores safe HTTPS document links, **not uploaded binary attachments**. A secure Storage bucket, signed uploads/downloads and antivirus scanning are not yet implemented.
+- Recurring daily scheduling uses `pg_cron` on the new project. Admin may also run due rules manually; duplicate protection uses unique `(rule_id,run_date)` ledger. Check `cron.job_run_details` to verify next scheduled execution.
+- Client screens query max 300 recent rows. Add pagination / cursor and full-table aggregates before scaling beyond that.
+- Last-mile e2e tests require real logged-in account/Staff QR and a working browser. Deployment READY alone is not proof those workflows passed.
+
+## Test plan
+- Admin: all-unit switcher, create unit, assign user to Unit, project & milestone, task, notice, recurring rule; CSV report.
+- Manager: own-unit task assignment and review; cannot read or assign other unit IDs.
+- Staff: QR/PIN, own unit tasks, checklist & progress, evidence HTTPS, note, follow-up, review submission; deny cross-unit operations.
+- Scheduling: manually create Daily rule (future date), verify cron at 06:45 Nepal and exactly one task generated.
+- Security: no cross-unit read with forged requests or guessed IDs; inactive unit membership/QR blocked; public signup disabled; verify refresh revocation scenario separately.
+
+---
+
 ## V1.1 live user onboarding and Admin setup
 
 - The bootstrap Admin account is `globaleramultiservice@gmail.com` in the NEW `GlobalEra-TaskMS` project. Its `public.profiles.role` is now `admin`; password remains managed by Supabase Auth.
