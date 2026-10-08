@@ -1,3 +1,12 @@
+## V1.1 live user onboarding and Admin setup
+
+- The bootstrap Admin account is `globaleramultiservice@gmail.com` in the NEW `GlobalEra-TaskMS` project. Its `public.profiles.role` is now `admin`; password remains managed by Supabase Auth.
+- Add a staff member from Admin → Team & Users → Add User. Staff email is optional: an internal, non-deliverable Auth identity (`@example.invalid`) is generated when missing. Staff signs in exclusively using personal QR URL and a 4-digit PIN.
+- Admin/Manager accounts require actual email and receive a one-time generated password. Share secrets separately from QR.
+- HMAC signing uses `ACCESS_LINK_SECRET` when configured. For immediate onboarding on freshly deployed Supabase projects, the hosted service-role key is used as a server-only fallback. Configure a dedicated `ACCESS_LINK_SECRET` later with care: changing HMAC secret invalidates existing QR links until they are regenerated.
+- Apply migration `supabase/migrations/202610080003_user_profile_upgrade.sql` (address/joining date) and deploy updated `task-api`, `staff-auth`, and `_shared/core.ts`.
+- QR/PIN and user creation MUST be tested with a real staff account before launch; Auth email validation and refresh session invalidation depend on live service configuration.
+
 # Global Era TaskMS — React + Supabase V1
 
 A dedicated Task Management System for Global Era: **Admin / Manager / Staff**, secure Staff **QR + 4-digit PIN**, task assignments, projects, follow-ups, notes, timelines, reviews, notices, user management, profile notes/timeline, reports and notifications.
