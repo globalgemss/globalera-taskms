@@ -48,11 +48,13 @@ Deno.serve(async(req)=>{
     if(ue){await admin.auth.admin.deleteUser(newId);throw Error(ue.message)}
     let access:Record<string,unknown>={}
     if(role==='staff'){
-     const pin=String(1000+(crypto.getRandomValues(new Uint32Array(1))[0]%9000))
-     const nonce=randHex(24),token=await hmacLink(newId,nonce),salt=randHex(18)
-     const {error:le}=await admin.from('user_access_links').insert({user_id:newId,nonce,token_hash:await sha256(token),pin_salt:salt,pin_hash:await hashPin(pin,salt)})
-     if(le){await admin.auth.admin.deleteUser(newId);throw Error('QR access setup failed: '+le.message)}
-     access={temporary_pin:pin,link_token:token}
+     try{
+      const pin=String(1000+(crypto.getRandomValues(new Uint32Array(1))[0]%9000))
+      const nonce=randHex(24),token=await hmacLink(newId,nonce),salt=randHex(18)
+      const {error:le}=await admin.from('user_access_links').insert({user_id:newId,nonce,token_hash:await sha256(token),pin_salt:salt,pin_hash:await hashPin(pin,salt)})
+      if(le)throw Error('QR access setup failed: '+le.message)
+      access={temporary_pin:pin,link_token:token}
+     }catch(e){await admin.auth.admin.deleteUser(newId);throw e}
     }else access={temporary_password:tempPassword}
     await admin.from('user_timeline').insert({user_id:newId,actor_id:myId,entry_type:'Account Created',description:`Account created with role ${role}`})
     await audit(admin,myId,'USER_CREATED','profile',newId,{role})
@@ -89,10 +91,25 @@ Deno.serve(async(req)=>{
    case 'get_link':{
     adminOnly()
     const userId=String(body.user_id||'')
+    const {data:profileTarget,error:pe}=await admin.from('profiles').select('role,status').eq('id',userId).maybeSingle()
+    if(pe||!profileTarget||profileTarget.role!=='staff')throw Error('Only staff accounts support QR access')
+    if(profileTarget.status!=='Active')throw Error('Activate the staff account before opening its QR link')
     const {data:link,error}=await admin.from('user_access_links').select('nonce,token_hash,is_active').eq('user_id',userId).maybeSingle()
-    if(error||!link||!link.is_active)throw Error('No active staff access link. Regenerate one.')
+    if(error)throw Error(error.message)
+    if(!link){
+     // Repair pre-existing orphaned staff accounts from the initial deployment.
+     // The temporary PIN is returned once, never stored in plain text.
+     const pin=String(1000+(crypto.getRandomValues(new Uint32Array(1))[0]%9000))
+     const nonce=randHex(24),token=await hmacLink(userId,nonce),salt=randHex(18)
+     const {error:createdError}=await admin.from('user_access_links').insert({user_id:userId,nonce,token_hash:await sha256(token),pin_salt:salt,pin_hash:await hashPin(pin,salt)})
+     if(createdError)throw Error('Could not repair staff QR access: '+createdError.message)
+     await admin.from('user_timeline').insert({user_id:userId,actor_id:myId,entry_type:'QR Access Activated',description:'Admin activated missing QR access and issued a new temporary PIN'})
+     await audit(admin,myId,'STAFF_QR_ACTIVATED','profile',userId)
+     return respond({link_token:token,temporary_pin:pin,restored:true})
+    }
+    if(!link.is_active)throw Error('QR access is inactive. Activate user first.')
     const token=await hmacLink(userId,link.nonce)
-    if(await sha256(token)!==link.token_hash)throw Error('Access secret has changed. Regenerate the link.')
+    if(await sha256(token)!==link.token_hash)throw Error('Access signing key has changed. Regenerate the QR link.')
     return respond({link_token:token})
    }
    case 'rotate_link':{

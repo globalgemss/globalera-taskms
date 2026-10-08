@@ -63,7 +63,8 @@ export default function Users(){
   setBusy(true)
   try{
    if(name==='get_link'||name==='rotate_link'){
-    const r=await api<{link_token:string}>(name,{user_id:user.id})
+    const r=await api<{link_token:string,temporary_pin?:string,restored?:boolean}>(name,{user_id:user.id})
+    if(r.temporary_pin){setTempKind('pin');setTempSecret(r.temporary_pin);toast.success('QR access activated. Copy the temporary PIN once.')}
     showQR(r.link_token,user.full_name,user.user_code)
     if(name==='rotate_link')toast.success('New QR generated; old QR revoked')
    }
