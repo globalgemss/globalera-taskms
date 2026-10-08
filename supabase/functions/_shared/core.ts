@@ -52,6 +52,7 @@ export async function isTaskAccessible(admin:ReturnType<typeof adminClient>,acto
  if(actorProfile.role==='admin')return task
  const {data:member}=await admin.from('unit_memberships').select('role').eq('unit_id',task.unit_id).eq('user_id',actorProfile.id).eq('status','Active').maybeSingle()
  if(!member)throw Error('Not a member of this business unit')
+ if(write&&member.role==='viewer')throw Error('Viewer permission is read-only')
  if(['unit_admin','manager'].includes(member.role)||task.created_by===actorProfile.id||task.supervisor_id===actorProfile.id)return task
  const {data:assigned}=await admin.from('task_assignees').select('user_id').eq('task_id',taskId)
  if((assigned||[]).some(x=>x.user_id===actorProfile.id)){

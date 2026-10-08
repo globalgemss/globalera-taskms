@@ -25,6 +25,8 @@ Deno.serve(async(req)=>{
   const canManage=async(unit:string)=>{if(profile.role==='admin')return;const m=await membership(myId,unit);if(!m||!['manager','unit_admin'].includes(m.role))throw Error('Manager access required for this business unit')}
   const canView=async(unit:string)=>{if(profile.role==='admin')return;if(!await membership(myId,unit))throw Error('No access to this business unit')}
   const taskManager=async()=>{const t=await task();await canManage(t.unit_id);return t}
+  const requireUnitUser=async(uid:unknown,unit:string)=>{if(!uid)return null;const id=String(uid);const {data:possibleAdmin}=await admin.from('profiles').select('role,status').eq('id',id).maybeSingle();if(possibleAdmin?.role==='admin'&&possibleAdmin.status==='Active')return id;const {data:m}=await admin.from('unit_memberships').select('user_id').eq('user_id',id).eq('unit_id',unit).eq('status','Active').maybeSingle();if(!m)throw Error('Selected user does not belong to this business unit');return id}
+  const requireUnitDepartment=async(dep:unknown,unit:string)=>{if(!dep)return null;const {data:d}=await admin.from('departments').select('id').eq('id',dep).eq('unit_id',unit).maybeSingle();if(!d)throw Error('Department does not belong to selected unit');return d.id}
   const validateProject=async(pid:unknown,unit:string)=>{if(!pid)return null;const {data}=await admin.from('projects').select('id,unit_id').eq('id',pid).maybeSingle();if(!data||data.unit_id!==unit)throw Error('Project does not belong to selected business unit');return data.id}
 
   const checkAssignees=async(ids:string[],unit:string)=>{
@@ -51,6 +53,8 @@ Deno.serve(async(req)=>{
     if(phone&&!/^[+\d()\-\s]{7,22}$/.test(phone))throw Error('Enter a valid phone number')
     // Each staff has an internal Auth identity so their RLS policies work correctly.
     const unitId=await mustUnit(body.unit_id)
+    await requireUnitDepartment(body.department_id,unitId)
+    await requireUnitUser(body.manager_id,unitId)
     const tempPassword=randHex(18)+'A!'
     const {data:created,error:ce}=await admin.auth.admin.createUser({email,password:tempPassword,email_confirm:true,user_metadata:{full_name}})
     if(ce||!created.user)throw Error(ce?.message||'Could not create auth account')
@@ -168,6 +172,7 @@ Deno.serve(async(req)=>{
     const unitId=await mustUnit(body.unit_id);await canManage(unitId)
     const title=text(body.title,220),assignees=await checkAssignees(Array.isArray(body.assignees)?body.assignees:[],unitId)
     const projectId=await validateProject(body.project_id,unitId)
+    await requireUnitUser(body.supervisor_id||myId,unitId)
     if(title.length<3)throw Error('Task title must be at least 3 characters')
     const priority=text(body.priority,20)||'Normal'
     if(!['Low','Normal','High','Urgent'].includes(priority))throw Error('Invalid priority')
@@ -221,7 +226,8 @@ Deno.serve(async(req)=>{
     if(['Completed','Cancelled','Review'].includes(t.status))throw Error('Progress cannot change in current task status')
     const value=Number(body.progress)
     if(!Number.isInteger(value)||value<0||value>100)throw Error('Progress must be 0–100')
-    const isManager=['admin','manager'].includes(profile.role)
+    const currentMembership=await membership(myId,t.unit_id)
+    const isManager=profile.role==='admin'||Boolean(currentMembership&&['unit_admin','manager'].includes(currentMembership.role))
     const {data:assigned}=await admin.from('task_assignees').select('user_id,progress').eq('task_id',t.id)
     if(!isManager&&!assigned?.some(x=>x.user_id===myId))throw Error('You are not assigned to this task')
     const assignee=String(body.assignee_id||myId)
@@ -287,6 +293,9 @@ Deno.serve(async(req)=>{
     if(!title||!message)throw Error('Title and message required')
     if(!['all','user','department','manager_team'].includes(target_type))throw Error('Invalid target type')
     if(target_type==='user'&&!body.target_user_id||target_type==='department'&&!body.target_department_id||target_type==='manager_team'&&!body.target_manager_id)throw Error('Target selection is required')
+    if(target_type==='user')await requireUnitUser(body.target_user_id,unitId)
+    if(target_type==='manager_team')await requireUnitUser(body.target_manager_id,unitId)
+    if(target_type==='department')await requireUnitDepartment(body.target_department_id,unitId)
     const {data,error}=await admin.from('notices').insert({unit_id:unitId,title,message,priority:body.priority||'Normal',target_type,target_user_id:target_type==='user'?body.target_user_id||null:null,target_department_id:target_type==='department'?body.target_department_id||null:null,target_manager_id:target_type==='manager_team'?body.target_manager_id||null:null,start_date:body.start_date||null,end_date:body.end_date||null,created_by:myId}).select('id').single()
     if(error)throw Error(error.message)
     await audit(admin,myId,'NOTICE_CREATED','notice',data.id)
@@ -325,6 +334,7 @@ Deno.serve(async(req)=>{
     const unitId=await mustUnit(body.unit_id);await canManage(unitId)
     const name=text(body.name,180)
     if(name.length<3)throw Error('Project name too short')
+    await requireUnitUser(profile.role==='admin'?body.manager_id||myId:myId,unitId)
     const {data,error}=await admin.from('projects').insert({name,unit_id:unitId,description:text(body.description,1500)||null,manager_id:profile.role==='admin'?body.manager_id||myId:myId}).select('id,project_no,name').single()
     if(error)throw Error(error.message)
     await audit(admin,myId,'PROJECT_CREATED','project',data.id)
@@ -344,7 +354,8 @@ Deno.serve(async(req)=>{
     if(error)throw Error(error.message);await audit(admin,myId,'UNIT_CREATED','unit',data.id);return respond({unit:data})
    }
    case 'update_unit':{
-    adminOnly();const unitId=await mustUnit(body.unit_id),patch:Record<string,unknown>={}
+    adminOnly();const unitId=String(body.unit_id||''),patch:Record<string,unknown>={}
+    const {data:existingUnit}=await admin.from('business_units').select('id').eq('id',unitId).maybeSingle();if(!existingUnit)throw Error('Unit not found')
     for(const k of ['name','description','status','color'])if(Object.hasOwn(body,k))patch[k]=body[k]
     if(patch.status&&!['Active','Inactive'].includes(String(patch.status)))throw Error('Invalid unit status')
     const {error}=await admin.from('business_units').update(patch).eq('id',unitId)
@@ -353,7 +364,8 @@ Deno.serve(async(req)=>{
    case 'set_unit_member':{
     adminOnly();const unitId=await mustUnit(body.unit_id),uid=String(body.user_id||''),role=String(body.role||'staff'),active=body.status!=='Inactive'
     if(!['unit_admin','manager','staff','viewer'].includes(role))throw Error('Invalid unit role')
-    const {data:target}=await admin.from('profiles').select('id').eq('id',uid).maybeSingle();if(!target)throw Error('User not found')
+    const {data:target}=await admin.from('profiles').select('id,role').eq('id',uid).maybeSingle();if(!target)throw Error('User not found')
+    if(['unit_admin','manager'].includes(role)&&target.role==='staff')throw Error('Set global profile role to Manager before granting management permissions')
     if(uid===myId&&!active)throw Error('Cannot deactivate your own unit membership')
     const {error}=await admin.from('unit_memberships').upsert({unit_id:unitId,user_id:uid,role,status:active?'Active':'Inactive'},{onConflict:'unit_id,user_id'})
     if(error)throw Error(error.message)
